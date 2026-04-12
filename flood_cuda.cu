@@ -241,6 +241,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
         /* Step 3: Propagation of previuosly computer water spillage to/from neighbors */
         max_spillage_iter = 0.0;
+
         for (row_pos = 0; row_pos < rows; row_pos++) {
             for (col_pos = 0; col_pos < columns; col_pos++) {
                 // If the cell has spillage
