@@ -49,3 +49,7 @@ Makefile
 # Valgrind
 vgcore.*
 callgrind.out.*
+
+# Binaries
+flood_cuda
+flood_seq
