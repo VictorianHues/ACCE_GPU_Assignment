@@ -117,6 +117,34 @@ __global__ void rainfall_kernel(int num_clouds, unsigned long long *d_total_rain
     }
 }
 
+__global__ void alternative_rainfall_kernel(int rows, int columns, int num_clouds, 
+                                            unsigned long long *d_total_rainfall, Cloud_t *d_clouds, 
+                                            float ex_factor, int *d_water_level) {
+    /* Iterate through matrix instead of clouds */
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row >= rows || col >= columns)
+        return;
+
+    float x_pos = COORD_MAT2SCEN_X(col);
+    float y_pos = COORD_MAT2SCEN_Y(row);
+
+    for (int cloud = 0; cloud < num_clouds; cloud++) {
+        Cloud_t c_cloud = d_clouds[cloud];
+
+        float distance =
+            sqrt((x_pos - c_cloud.x) * (x_pos - c_cloud.x) + (y_pos - c_cloud.y) * (y_pos - c_cloud.y));
+        if (distance < c_cloud.radius) {
+            float rain = ex_factor *
+                         MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
+            float meters_per_minute = rain / 1000 / 60;
+            int idx = row * columns + col;
+            atomicAdd(&d_water_level[idx], FIXED(meters_per_minute));
+            atomicAdd(d_total_rainfall, (unsigned long long)FIXED(meters_per_minute));
+        }  
+    }
+}
 
 
 __global__ void compute_spillage_kernel(int rows, int columns, unsigned long long *d_total_water_loss, float *d_ground, 
@@ -383,7 +411,8 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
         /* Step 1.2: Rainfall */
         CUDA_CHECK_FUNCTION(cudaMemset(d_total_rainfall, 0, sizeof(unsigned long long)));
-        rainfall_kernel<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(p->num_clouds, d_total_rainfall, d_clouds, rows, columns, p->ex_factor, d_water_level);
+        alternative_rainfall_kernel<<<grid, block>>>(rows, columns, p->num_clouds, d_total_rainfall, d_clouds, p->ex_factor, d_water_level);
+        //rainfall_kernel<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(p->num_clouds, d_total_rainfall, d_clouds, rows, columns, p->ex_factor, d_water_level);
         CUDA_CHECK_KERNEL();
         CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
