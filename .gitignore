@@ -1,0 +1,51 @@
+# Compiled object files
+*.o
+*.obj
+
+# Compiled libraries
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug symbols
+*.dSYM/
+*.su
+*.gch
+*.pch
+
+# Dependencies
+*.d
+*.dep
+
+# Build directories
+build/
+dist/
+bin/
+obj/
+_logs/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# CMake
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+Makefile
+
+# Valgrind
+vgcore.*
+callgrind.out.*
