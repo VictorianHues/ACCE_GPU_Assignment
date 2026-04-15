@@ -14,7 +14,7 @@ LIBS=-lm
 CULIBS=-lm rng.c
 
 # Targets to build
-OBJS=flood_seq flood_cuda
+OBJS=flood_seq flood_cuda flood_cuda_soa
 
 # Rules. By default show help
 help:
@@ -47,7 +47,13 @@ flood_seq: flood.o flood_seq.o
 flood_cuda.o: flood_cuda.cu
 	$(CUDACC) $(CUFLAGS) $(DEBUG) -c $< -o $@
 
-flood_cuda: flood.o flood_cuda.o
+flood_cuda: flood.o flood_cuda.o 
+	$(CUDACC) $(DEBUG) $^ $(CULIBS) -o $@
+
+flood_cuda_soa.o: flood_cuda_soa.cu
+	$(CUDACC) $(CUFLAGS) $(DEBUG) -c $< -o $@
+
+flood_cuda_soa: flood.o flood_cuda_soa.o
 	$(CUDACC) $(DEBUG) $^ $(CULIBS) -o $@
 
 # Remove the target files
@@ -73,3 +79,6 @@ test_seq_remote: flood_seq
 
 test_cuda: flood_cuda
 	prun -t 15:00 -np 1 -native '-C gpunode' ./flood_cuda $$(cat test_files/debug.in)
+
+test_cuda_soa: flood_cuda_soa
+	prun -t 15:00 -np 1 -native '-C gpunode' ./flood_cuda_soa $$(cat test_files/debug.in)

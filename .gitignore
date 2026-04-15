@@ -52,4 +52,5 @@ callgrind.out.*
 
 # Binaries
 flood_cuda
+flood_cuda_soa
 flood_seq
