@@ -13,7 +13,7 @@
  * 2024/2025
  */
 
-#include <float.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -109,8 +109,7 @@ __global__ void rainfall_kernel(int num_clouds, unsigned long long *d_total_rain
                 float rain = ex_factor *
                              MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
                 float meters_per_minute = rain / 1000 / 60;
-                int idx = ((int)row_pos) * columns + ((int)col_pos);
-                atomicAdd(&d_water_level[idx], FIXED(meters_per_minute));
+                accessMat(d_water_level, (int)row_pos, (int)col_pos) += FIXED(meters_per_minute);
                 atomicAdd(d_total_rainfall, (unsigned long long)FIXED(meters_per_minute));
             }
         }
@@ -139,8 +138,7 @@ __global__ void alternative_rainfall_kernel(int rows, int columns, int num_cloud
             float rain = ex_factor *
                          MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
             float meters_per_minute = rain / 1000 / 60;
-            int idx = row * columns + col;
-            atomicAdd(&d_water_level[idx], FIXED(meters_per_minute));
+            accessMat(d_water_level, row, col) += FIXED(meters_per_minute);
             atomicAdd(d_total_rainfall, (unsigned long long)FIXED(meters_per_minute));
         }  
     }
@@ -231,7 +229,7 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
     }
 }
 
-__global__ void compute_spillage_propogation_kernel(int minute, int rows, int columns, int *d_water_level, float *d_spillage_flag,
+__global__ void compute_spillage_propagation_kernel(int minute, int rows, int columns, int *d_water_level, float *d_spillage_flag,
                                                    float *d_spillage_level, float *d_spillage_from_neigh,
                                                    double *d_max_spillage_iter, double *d_max_spillage_scenario,
                                                    int *d_max_spillage_minute) {
@@ -250,7 +248,6 @@ __global__ void compute_spillage_propogation_kernel(int minute, int rows, int co
         accessMat(d_water_level, row, col) -=
             FIXED(accessMat(d_spillage_level, row, col) / SPILLAGE_FACTOR);
 
-        // Compute termination condition: Maximum cell spillage during the iteration
         if (accessMat(d_spillage_level, row, col) / SPILLAGE_FACTOR > *d_max_spillage_iter) {
             *d_max_spillage_iter = accessMat(d_spillage_level, row, col) / SPILLAGE_FACTOR; // Needs to be adjusted for race condition
         }
@@ -267,6 +264,51 @@ __global__ void compute_spillage_propogation_kernel(int minute, int rows, int co
         accessMat(d_water_level, row, col) +=
             FIXED(accessMat3D(d_spillage_from_neigh, row, col, cell_pos) / SPILLAGE_FACTOR);
     }
+}
+
+__global__ void compute_private_spillage_propagation_kernel(
+    int rows, int columns,
+    int *d_water_level,
+    float *d_spillage_flag,
+    float *d_spillage_level,
+    float *d_spillage_from_neigh,
+    int *d_iter_max_spill)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y; 
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.y * blockDim.x + threadIdx.x; // Thread ID within the block
+    extern __shared__ int smax[]; // Shared memory for maximum spillage in the iteration (fixed-point representation)
+    int local_max = 0; // Local variable to track the maximum spillage for this thread (fixed-point representation)
+
+    if (row < rows && col < columns) { // Check if the thread is within bounds (Can't return early do to syncthreads)
+        if (accessMat(d_spillage_flag, row, col) == 1.0f) {
+            // Eliminate the spillage from the origin cell
+            int out_fixed = FIXED(accessMat(d_spillage_level, row, col) / SPILLAGE_FACTOR);
+            accessMat(d_water_level, row, col) -= out_fixed; // Update water level with fixed-point spillage
+            local_max = out_fixed; // Update local maximum spillage for this thread
+        }
+
+        // Accumulate spillage from neighbors
+        for (int cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
+            int depths = CONTIGUOUS_CELLS;
+            accessMat(d_water_level, row, col) +=
+                FIXED(accessMat3D(d_spillage_from_neigh, row, col, cell_pos) / SPILLAGE_FACTOR);
+        }
+    }
+
+    smax[tid] = local_max; // Store the local maximum spillage for this thread in shared memory
+    __syncthreads(); // Ensure all threads have written their local maximum to shared memory before reduction
+
+    // Perform parallel reduction to find the maximum spillage in the iteration
+    // NOTE: Requires blockDim.x * blockDim.y to be a power of 2 for this reduction to work correctly
+    for (int stride = (blockDim.x * blockDim.y) / 2; stride > 0; stride /= 2) { // >>= 1?
+        if (tid < stride && smax[tid + stride] > smax[tid]) {
+            smax[tid] = smax[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) atomicMax(d_iter_max_spill, smax[0]);
 }
 
 __global__ void reset_ancillary_structures_kernel(int rows, int columns, float *d_spillage_flag,
@@ -314,21 +356,17 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     float *h_ground;              // Ground height
     unsigned long long h_total_water_loss; // Device-side accumulator copy (atomicAdd-compatible)
     unsigned long long h_total_rainfall; // Device-side accumulator for total water loss
-    double h_max_spillage_iter; // Maximum spillage in the current iteration (for termination condition)
-    double h_max_spillage_scenario; // Maximum spillage during the scenario (for statistics)
+    int h_max_spillage_iter; // Fixed-point max spillage in the current iteration
+    int h_max_spillage_scenario; // Fixed-point max spillage during the scenario
     int h_max_spillage_minute; // Minute of the maximum spillage during the scenario (for statistics)
     float *h_spillage_flag;       // Indicates which cells are spilling to neighbors
     float *h_spillage_level;      // Maximum level of spillage of each cell
     float *h_spillage_from_neigh; // Spillage from each neighbor
 
-
-
     
     unsigned long long *d_total_water_loss = NULL;
     unsigned long long *d_total_rainfall = NULL;
-    double *d_max_spillage_iter = NULL;
-    double *d_max_spillage_scenario = NULL;
-    int *d_max_spillage_minute = NULL;
+    int *d_max_spillage_iter = NULL;
     int *d_water_level = NULL;
 
     Cloud_t *d_clouds = NULL;
@@ -341,7 +379,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     h_ground = p->ground;
     h_total_water_loss = 0;
     h_total_rainfall = 0;
-    h_max_spillage_iter = DBL_MAX;
+    h_max_spillage_iter = INT_MAX;
     h_max_spillage_scenario = 0;
     h_max_spillage_minute = 0;
     h_water_level = (int *)malloc(sizeof(int) * cell_count);
@@ -360,9 +398,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_ground, sizeof(float) * cell_count));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_total_water_loss, sizeof(unsigned long long)));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_total_rainfall, sizeof(unsigned long long)));
-    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_max_spillage_iter, sizeof(double)));
-    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_max_spillage_scenario, sizeof(double)));
-    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_max_spillage_minute, sizeof(int)));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_max_spillage_iter, sizeof(int)));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds, sizeof(Cloud_t) * (size_t)p->num_clouds));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_water_level, sizeof(int) * cell_count));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_flag, sizeof(float) * cell_count));
@@ -393,7 +429,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     r->runtime = get_time();
 
     /* Flood simulation */
-    for (*minute = 0; *minute < p->num_minutes && h_max_spillage_iter > p->threshold; (*minute)++) {
+    for (*minute = 0; *minute < p->num_minutes && FLOATING(h_max_spillage_iter) > p->threshold; (*minute)++) {
 
         /* Step 1: Cloud movement and rainfall */
         /* Step 1.1: Cloud movement */
@@ -438,20 +474,23 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
 
         /* Step 3: Propagation of previously computer water spillage to/from neighbors */
-        h_max_spillage_iter = 0.0;
-        CUDA_CHECK_FUNCTION(cudaMemcpy(d_max_spillage_scenario, &h_max_spillage_scenario, sizeof(double), cudaMemcpyHostToDevice));
+        h_max_spillage_iter = 0;
+        CUDA_CHECK_FUNCTION(cudaMemcpy(d_max_spillage_iter, &h_max_spillage_iter, sizeof(int), cudaMemcpyHostToDevice));
 
-        compute_spillage_propogation_kernel<<<grid, block>>>(*minute, rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
-                                                            d_max_spillage_iter, d_max_spillage_scenario, d_max_spillage_minute);
+        // compute_spillage_propagation_kernel<<<grid, block>>>(*minute, rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
+        //                                                     d_max_spillage_iter, d_max_spillage_scenario, d_max_spillage_minute);
+        
+        compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
+                                                    d_max_spillage_iter);
         CUDA_CHECK_KERNEL();
         CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
-        CUDA_CHECK_FUNCTION(cudaMemcpy(&h_max_spillage_iter, d_max_spillage_iter, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK_FUNCTION(cudaMemcpy(&h_max_spillage_scenario, d_max_spillage_scenario, sizeof(double), cudaMemcpyDeviceToHost));
-        CUDA_CHECK_FUNCTION(cudaMemcpy(&h_max_spillage_minute, d_max_spillage_minute, sizeof(int), cudaMemcpyDeviceToHost));
-    
-        r->max_spillage_scenario = h_max_spillage_scenario;
-        r->max_spillage_minute = h_max_spillage_minute;
+        CUDA_CHECK_FUNCTION(cudaMemcpy(&h_max_spillage_iter, d_max_spillage_iter, sizeof(int), cudaMemcpyDeviceToHost));
+
+        if (h_max_spillage_iter > h_max_spillage_scenario) {
+            h_max_spillage_scenario = h_max_spillage_iter;
+            h_max_spillage_minute = *minute;
+        }
 
 #ifdef DEBUG
 #ifndef ANIMATION
@@ -469,6 +508,11 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
     r->runtime = get_time() - r->runtime;
 
+    r->max_spillage_scenario = FLOATING(h_max_spillage_scenario);
+    r->max_spillage_minute = h_max_spillage_minute;
+
+    CUDA_CHECK_FUNCTION(cudaMemcpy(h_water_level, d_water_level, sizeof(int) * cell_count, cudaMemcpyDeviceToHost));
+
     if (p->final_matrix) {
         print_matrix(PRECISION_FIXED, rows, columns, h_water_level, "Water after spillage");
     }
@@ -484,7 +528,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     }
 
     /* Free resources */
-    //free(h_ground);
+    free(h_ground);
     free(h_water_level);
     free(h_spillage_flag);
     free(h_spillage_level);
@@ -499,8 +543,6 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaFree(d_spillage_level));
     CUDA_CHECK_FUNCTION(cudaFree(d_spillage_from_neigh));
     CUDA_CHECK_FUNCTION(cudaFree(d_max_spillage_iter));
-    CUDA_CHECK_FUNCTION(cudaFree(d_max_spillage_scenario));
-    CUDA_CHECK_FUNCTION(cudaFree(d_max_spillage_minute));
 
 
     CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
