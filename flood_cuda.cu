@@ -194,7 +194,7 @@ __global__ void alt_calc_rainfall_kernel(int rows, int columns, int num_clouds,
 
                 if (dist2 < radius2) { // If the cell is within the cloud's radius, compute rainfall contribution
                     float distance = sqrtf(dist2);
-                    float rain = ex_factor * fmaxf(0.0f, intensity - distance / sqrt_divr_intensity);
+                    float rain = fmaxf(0.0f, intensity - distance * sqrt_divr_intensity);
                     cell_rainfall += rain * rainscale;
                 }
             }
@@ -471,39 +471,7 @@ __global__ void alt_compute_spillage_kernel(int rows, int columns, unsigned long
         atomicAdd(d_total_water_loss, water_loss);
 }
 
-__global__ void compute_spillage_propagation_kernel(int rows, int columns, int *d_water_level, float *d_spillage_flag,
-                                                   float *d_spillage_level, float *d_spillage_from_neigh,
-                                                   int *d_max_spillage_iter) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    constexpr int continguous_cells = 4; // Number of contiguous neighbor cells (up, down, left, right)
-
-    d_max_spillage_iter[0] = 0; // Reset max spillage for the iteration (fixed-point representation)
-
-    int cell_pos;
-
-    if (row >= rows || col >= columns)
-        return;
-
-    // If the cell has spillage
-    if (accessMat(d_spillage_flag, row, col) == 1) {
-
-        // Eliminate the spillage from the origin cell
-        int out_fixed = FIXED(accessMat(d_spillage_level, row, col) / SPILLAGE_FACTOR);
-        accessMat(d_water_level, row, col) -= out_fixed;
-        atomicMax(d_max_spillage_iter, out_fixed);
-    }
-
-    // Accumulate spillage from neighbors
-    for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-        int depths = continguous_cells;
-        accessMat(d_water_level, row, col) +=
-            FIXED(accessMat3D(d_spillage_from_neigh, row, col, cell_pos) / SPILLAGE_FACTOR);
-    }
-}
-
-__global__ void step3_kernel(
+__global__ void compute_spillage_propagation_kernel(
     int *water_level,
     float *spillage_flag,
     float *spillage_level,
@@ -699,7 +667,6 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     init_state_kernel<<<grid, block>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level,
                                        d_spillage_from_neigh);
     CUDA_CHECK_KERNEL();
-    //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
 #ifdef DEBUG
     print_matrix(PRECISION_FLOAT, rows, columns, h_ground, "Ground heights");
@@ -721,7 +688,6 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         /* Step 1.1: Cloud movement */
         cloud_movement_kernel<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(p->num_clouds, d_clouds);
         CUDA_CHECK_KERNEL();
-        //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
 #ifdef DEBUG
 #ifndef ANIMATION
@@ -732,7 +698,6 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 #endif
 
         /* Step 1.2: Rainfall */
-        //CUDA_CHECK_FUNCTION(cudaMemset(d_total_rainfall, 0, sizeof(unsigned long long)));
         size_t rainfall_shared_mem = (size_t)(block.x * block.y) * sizeof(Cloud_t);
         alt_calc_rainfall_kernel<<<grid, block, rainfall_shared_mem>>>(rows, columns, p->num_clouds,
                                            d_total_rainfall, d_clouds, p->ex_factor,
@@ -740,7 +705,6 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         //alternative_rainfall_kernel<<<grid, block>>>(rows, columns, p->num_clouds, d_total_rainfall, d_clouds, p->ex_factor, d_water_level);
         //rainfall_kernel<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(p->num_clouds, d_total_rainfall, d_clouds, rows, columns, p->ex_factor, d_water_level);
         CUDA_CHECK_KERNEL();
-        //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
 
 #ifdef DEBUG
@@ -755,19 +719,15 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
                                            d_spillage_level, d_spillage_from_neigh);
 
         CUDA_CHECK_KERNEL();
-        //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
         /* Step 3: Propagation of previously computer water spillage to/from neighbors */
-        // h_max_spillage_iter = 0;
-        // CUDA_CHECK_FUNCTION(cudaMemcpy(d_max_spillage_iter, &h_max_spillage_iter, sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK_FUNCTION(cudaMemset(d_max_spillage_iter, 0, sizeof(int)));
 
-        compute_spillage_propagation_kernel<<<grid, block>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
-                                    d_max_spillage_iter);
+        compute_spillage_propagation_kernel<<<grid, block>>>(d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh, d_max_spillage_iter, rows, columns);
         
-        // compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
-        //                                             d_max_spillage_iter);
+        compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
+                                                    d_max_spillage_iter);
         CUDA_CHECK_KERNEL();
-        //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
 #ifdef DEBUG
 #ifndef ANIMATION
