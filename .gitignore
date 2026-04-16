@@ -58,3 +58,7 @@ callgrind.out.*
 flood_cuda
 flood_cuda_soa
 flood_seq
+
+# Project Files
+report/
+*.txt
