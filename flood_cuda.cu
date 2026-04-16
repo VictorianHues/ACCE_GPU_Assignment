@@ -240,36 +240,48 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         }
 
         /* Step 3: Propagation of previuosly computer water spillage to/from neighbors */
+        dim3 block(16, 16);
+        dim3 grid(
+            (columns + block.x - 1) / block.x,
+            (rows + block.y - 1) / block.y
+        );
+
+        // launch with device pointers
+        // device declarations missing
+        step3_kernel<<<grid, block>>>(
+            d_water_level,
+            d_spillage_flag,
+            d_spillage_level,
+            d_spillage_from_neigh,
+            rows,
+            columns
+        );
+
+        // termination condition and scenario statistics - CPU computation
+        // Investigate if this can be further optimised
+        cudaMemcpy(
+            spillage_level_host,
+            d_spillage_level,
+            sizeof(float) * (size_t)rows * (size_t)columns,
+            cudaMemcpyDeviceToHost
+        );
+
         max_spillage_iter = 0.0;
 
         for (row_pos = 0; row_pos < rows; row_pos++) {
             for (col_pos = 0; col_pos < columns; col_pos++) {
-                // If the cell has spillage
-                if (accessMat(spillage_flag, row_pos, col_pos) == 1) {
 
-                    // Eliminate the spillage from the origin cell
-                    accessMat(water_level, row_pos, col_pos) -=
-                        FIXED(accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR);
-
-                    // Compute termination condition: Maximum cell spillage during the iteration
-                    if (accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR > max_spillage_iter) {
-                        max_spillage_iter = accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR;
-                    }
-                    // Statistics: Record maximum cell spillage during the scenario and its time
-                    if (accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR > r->max_spillage_scenario) {
-                        r->max_spillage_scenario = accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR;
-                        r->max_spillage_minute = *minute;
-                    }
+                if (accessMat(spillage_level_host, row_pos, col_pos) / SPILLAGE_FACTOR > max_spillage_iter) {
+                    max_spillage_iter = accessMat(spillage_level_host, row_pos, col_pos) / SPILLAGE_FACTOR;
                 }
 
-                // Accumulate spillage from neighbors
-                for (cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
-                    int depths = CONTIGUOUS_CELLS;
-                    accessMat(water_level, row_pos, col_pos) +=
-                        FIXED(accessMat3D(spillage_from_neigh, row_pos, col_pos, cell_pos) / SPILLAGE_FACTOR);
+                if (accessMat(spillage_level_host, row_pos, col_pos) / SPILLAGE_FACTOR > r->max_spillage_scenario) {
+                    r->max_spillage_scenario = accessMat(spillage_level_host, row_pos, col_pos) / SPILLAGE_FACTOR;
+                    r->max_spillage_minute = *minute;
                 }
             }
         }
+
 
 #ifdef DEBUG
 #ifndef ANIMATION
