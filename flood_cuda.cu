@@ -723,7 +723,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         /* Step 3: Propagation of previously computer water spillage to/from neighbors */
         CUDA_CHECK_FUNCTION(cudaMemset(d_max_spillage_iter, 0, sizeof(int)));
 
-        compute_spillage_propagation_kernel<<<grid, block>>>(d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh, d_max_spillage_iter, rows, columns);
+        // compute_spillage_propagation_kernel<<<grid, block>>>(d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh, d_max_spillage_iter, rows, columns);
         
         compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
                                                     d_max_spillage_iter);
