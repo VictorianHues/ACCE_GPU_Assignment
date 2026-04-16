@@ -1,0 +1,11 @@
+* text=auto
+
+# Enforce LF for source and project text files.
+*.c text eol=lf
+*.h text eol=lf
+*.cu text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.py text eol=lf
+Makefile text eol=lf
