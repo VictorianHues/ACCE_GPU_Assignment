@@ -662,7 +662,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds, p->clouds, sizeof(Cloud_t) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
 
 
-    dim3 block(16, 8); // Adjust for GPU architecture and problem size
+    dim3 block(BLOCK_X, BLOCK_Y); // Adjust for GPU architecture and problem size
     dim3 grid((columns + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
     init_state_kernel<<<grid, block>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level,
                                        d_spillage_from_neigh);
@@ -723,10 +723,10 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         /* Step 3: Propagation of previously computer water spillage to/from neighbors */
         CUDA_CHECK_FUNCTION(cudaMemset(d_max_spillage_iter, 0, sizeof(int)));
 
-        // compute_spillage_propagation_kernel<<<grid, block>>>(d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh, d_max_spillage_iter, rows, columns);
+        compute_spillage_propagation_kernel<<<grid, block>>>(d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh, d_max_spillage_iter, rows, columns);
         
-        compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
-                                                    d_max_spillage_iter);
+        // compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
+        //                                             d_max_spillage_iter);
         CUDA_CHECK_KERNEL();
 
 #ifdef DEBUG
