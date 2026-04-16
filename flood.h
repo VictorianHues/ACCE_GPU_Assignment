@@ -26,6 +26,13 @@
 #define SPILLAGE_FACTOR 2
 
 /*
+ * Block dimensions
+ */
+#define BLOCK_X 16
+#define BLOCK_Y 8
+#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
+
+/*
  * Structure to represent moving rainy clouds
  * This structure can be changed and/or optimized by the students
  */
