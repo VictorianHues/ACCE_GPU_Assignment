@@ -47,6 +47,23 @@
 
 extern "C" double get_time();
 
+static constexpr int RAIN_CONST_MAX_CLOUDS = 1024;
+static constexpr int RAIN_CONST_FASTPATH_CLOUDS = 256;
+
+__constant__ float c_rain_cloud_x[RAIN_CONST_MAX_CLOUDS];
+__constant__ float c_rain_cloud_y[RAIN_CONST_MAX_CLOUDS];
+__constant__ float c_rain_cloud_radius[RAIN_CONST_MAX_CLOUDS];
+__constant__ float c_rain_cloud_intensity[RAIN_CONST_MAX_CLOUDS];
+__constant__ float c_rain_cloud_sqrt_divr[RAIN_CONST_MAX_CLOUDS];
+__constant__ int c_rain_cloud_active[RAIN_CONST_MAX_CLOUDS];
+
+__device__ __forceinline__ unsigned long long warp_reduce_sum_ull(unsigned long long value) {
+    #pragma unroll
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        value += __shfl_down_sync(0xFFFFFFFFu, value, offset);
+    return value;
+}
+
 /*
  *  - one thread per cell
  *  - initialize per-cell state arrays
@@ -71,6 +88,158 @@ __global__ void init_state_kernel(int rows, int columns, int *d_water_level, flo
     }
 }
 
+__global__ void cloud_movement_kernel_soa(int num_clouds, float *d_cloud_x, float *d_cloud_y,
+                                          const float *d_cloud_speed, const float *d_cloud_angle,
+                                          const int *d_cloud_active) {
+    int cloud_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (cloud_idx >= num_clouds)
+        return;
+
+    if (d_cloud_active[cloud_idx] == 0)
+        return;
+
+    float km_minute = d_cloud_speed[cloud_idx] / 60.0f;
+    float angle_rad = d_cloud_angle[cloud_idx] * (float)M_PI / 180.0f;
+    d_cloud_x[cloud_idx] += km_minute * cosf(angle_rad);
+    d_cloud_y[cloud_idx] += km_minute * sinf(angle_rad);
+}
+
+__global__ void alt_calc_rainfall_kernel_soa(int rows, int columns, int num_clouds,
+                                              unsigned long long *d_total_rainfall,
+                                              const float *__restrict__ d_cloud_x,
+                                              const float *__restrict__ d_cloud_y,
+                                              const float *__restrict__ d_cloud_radius,
+                                              const float *__restrict__ d_cloud_intensity,
+                                              const float *__restrict__ d_cloud_sqrt_divr_intensity,
+                                              const int *__restrict__ d_cloud_active, float ex_factor,
+                                              int *d_water_level) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int threads_per_block = blockDim.x * blockDim.y;
+
+    int in_bounds = (row < rows && col < columns);
+    float x_pos = 0.0f;
+    float y_pos = 0.0f;
+    if (in_bounds) {
+        x_pos = COORD_MAT2SCEN_X(col);
+        y_pos = COORD_MAT2SCEN_Y(row);
+    }
+
+    extern __shared__ unsigned char shared_raw[];
+    float *shared_cloud_x = (float *)shared_raw;
+    float *shared_cloud_y = shared_cloud_x + threads_per_block;
+    float *shared_cloud_radius = shared_cloud_y + threads_per_block;
+    float *shared_cloud_intensity = shared_cloud_radius + threads_per_block;
+    float *shared_cloud_sqrt_divr = shared_cloud_intensity + threads_per_block;
+    int *shared_cloud_active = (int *)(shared_cloud_sqrt_divr + threads_per_block);
+
+    float cell_rainfall = 0.0f;
+    float rain_scale = ex_factor / 60000.0f; // cm/h -> m/min
+
+    for (int base = 0; base < num_clouds; base += threads_per_block) {
+        int cloud_idx = base + tid;
+        if (cloud_idx < num_clouds) {
+            shared_cloud_x[tid] = d_cloud_x[cloud_idx];
+            shared_cloud_y[tid] = d_cloud_y[cloud_idx];
+            shared_cloud_radius[tid] = d_cloud_radius[cloud_idx];
+            shared_cloud_intensity[tid] = d_cloud_intensity[cloud_idx];
+            shared_cloud_sqrt_divr[tid] = d_cloud_sqrt_divr_intensity[cloud_idx];
+            shared_cloud_active[tid] = d_cloud_active[cloud_idx];
+        } else {
+            shared_cloud_active[tid] = 0;
+        }
+        __syncthreads();
+
+        int tile_clouds = MIN(threads_per_block, num_clouds - base);
+        if (in_bounds) {
+            for (int cloud = 0; cloud < tile_clouds; cloud++) {
+                if (shared_cloud_active[cloud] == 0)
+                    continue;
+
+                float dx = x_pos - shared_cloud_x[cloud];
+                float dy = y_pos - shared_cloud_y[cloud];
+                float dist2 = dx * dx + dy * dy;
+                float cloud_radius = shared_cloud_radius[cloud];
+                float radius2 = cloud_radius * cloud_radius;
+
+                if (dist2 < radius2) {
+                    float distance = sqrtf(dist2);
+                    float rain =
+                        fmaxf(0.0f, shared_cloud_intensity[cloud] - distance * shared_cloud_sqrt_divr[cloud]);
+                    cell_rainfall += rain_scale * rain;
+                }
+            }
+        }
+
+        __syncthreads();
+    }
+
+    unsigned long long fixed_rain = 0;
+    if (in_bounds) {
+        fixed_rain = (unsigned long long)FIXED(cell_rainfall);
+        accessMat(d_water_level, row, col) += (int)fixed_rain;
+    }
+
+    // Aggregate per-warp contributions before global atomic update.
+    unsigned long long warp_sum = warp_reduce_sum_ull(fixed_rain);
+    if ((tid & (warpSize - 1)) == 0 && warp_sum > 0)
+        atomicAdd(d_total_rainfall, warp_sum);
+}
+
+__global__ void alt_calc_rainfall_kernel_soa_const(int rows, int columns, int num_clouds,
+                                                    unsigned long long *d_total_rainfall,
+                                                    float ex_factor, int *d_water_level) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int in_bounds = (row < rows && col < columns);
+
+    float x_pos = 0.0f;
+    float y_pos = 0.0f;
+    if (in_bounds) {
+        x_pos = COORD_MAT2SCEN_X(col);
+        y_pos = COORD_MAT2SCEN_Y(row);
+    }
+
+    float cell_rainfall = 0.0f;
+    float rain_scale = ex_factor / 60000.0f; // cm/h -> m/min
+
+    if (in_bounds) {
+        #pragma unroll 4
+        for (int cloud = 0; cloud < num_clouds; cloud++) {
+            if (c_rain_cloud_active[cloud] == 0)
+                continue;
+
+            float dx = x_pos - c_rain_cloud_x[cloud];
+            float dy = y_pos - c_rain_cloud_y[cloud];
+            float dist2 = dx * dx + dy * dy;
+            float cloud_radius = c_rain_cloud_radius[cloud];
+            float radius2 = cloud_radius * cloud_radius;
+
+            if (dist2 < radius2) {
+                float distance = sqrtf(dist2);
+                float rain = fmaxf(0.0f, c_rain_cloud_intensity[cloud] - distance * c_rain_cloud_sqrt_divr[cloud]);
+                cell_rainfall += rain_scale * rain;
+            }
+        }
+    }
+
+    unsigned long long fixed_rain = 0;
+    if (in_bounds) {
+        fixed_rain = (unsigned long long)FIXED(cell_rainfall);
+        accessMat(d_water_level, row, col) += (int)fixed_rain;
+    }
+
+    // Aggregate per-warp contributions before global atomic update.
+    unsigned long long warp_sum = warp_reduce_sum_ull(fixed_rain);
+    if ((tid & (warpSize - 1)) == 0 && warp_sum > 0)
+        atomicAdd(d_total_rainfall, warp_sum);
+}
+
 __global__ void cloud_movement_kernel(int num_clouds, Cloud_t *d_clouds) {
     int cloud_idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -92,10 +261,10 @@ __global__ void rainfall_kernel(int num_clouds, unsigned long long *d_total_rain
 
     Cloud_t c_cloud = d_clouds[cloud_idx];
     // Compute the bounding box area of the cloud
-    float row_start = COORD_SCEN2MAT_Y(fmaxf(0, c_cloud.y - c_cloud.radius));
-    float row_end = COORD_SCEN2MAT_Y(fminf(c_cloud.y + c_cloud.radius, SCENARIO_SIZE));
-    float col_start = COORD_SCEN2MAT_X(fmaxf(0, c_cloud.x - c_cloud.radius));
-    float col_end = COORD_SCEN2MAT_X(fminf(c_cloud.x + c_cloud.radius, SCENARIO_SIZE));
+    float row_start = COORD_SCEN2MAT_Y(MAX(0, c_cloud.y - c_cloud.radius));
+    float row_end = COORD_SCEN2MAT_Y(MIN(c_cloud.y + c_cloud.radius, SCENARIO_SIZE));
+    float col_start = COORD_SCEN2MAT_X(MAX(0, c_cloud.x - c_cloud.radius));
+    float col_end = COORD_SCEN2MAT_X(MIN(c_cloud.x + c_cloud.radius, SCENARIO_SIZE));
     float distance;
 
     // Add rain to the ground water level
@@ -107,7 +276,7 @@ __global__ void rainfall_kernel(int num_clouds, unsigned long long *d_total_rain
                 sqrt((x_pos - c_cloud.x) * (x_pos - c_cloud.x) + (y_pos - c_cloud.y) * (y_pos - c_cloud.y));
             if (distance < c_cloud.radius) {
                 float rain = ex_factor *
-                             fmaxf(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
+                             MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
                 float meters_per_minute = rain / 1000 / 60;
                 accessMat(d_water_level, (int)row_pos, (int)col_pos) += FIXED(meters_per_minute);
                 atomicAdd(d_total_rainfall, (unsigned long long)FIXED(meters_per_minute));
@@ -143,7 +312,7 @@ __global__ void alternative_rainfall_kernel(int rows, int columns, int num_cloud
             * r = ex * max(0, I - (d / R) * sqrt(I))
             */
             float rain = ex_factor *
-                         fmaxf(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
+                         MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
             float meters_per_minute = rain / 1000 / 60;
             accessMat(d_water_level, row, col) += FIXED(meters_per_minute);
             atomicAdd(d_total_rainfall, (unsigned long long)FIXED(meters_per_minute));
@@ -157,55 +326,37 @@ __global__ void alt_calc_rainfall_kernel(int rows, int columns, int num_clouds,
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    int tid = threadIdx.y * blockDim.x + threadIdx.x;
-    int threads_per_block = blockDim.x * blockDim.y; // Tile size for cloud processing
-
-    int in_bounds = (row < rows && col < columns);
-
-    float x_pos = 0.0f;
-    float y_pos = 0.0f;
-    if (in_bounds) { // Compute scenario coordinates for the cell (only for threads that will process rainfall)
-        x_pos = COORD_MAT2SCEN_X(col);
-        y_pos = COORD_MAT2SCEN_Y(row);
-    }
-
-    extern __shared__ Cloud_t shared_clouds[]; // Shared memory for a tile of clouds
-
-    float cell_rainfall = 0.0f;
-    float rainscale = ex_factor / 1000.0f / 60.0f; // Precompute the constant part of the rainfall contribution
-
-    for (int base = 0; base < num_clouds; base += threads_per_block) { // Iterate over clouds in tiles "strides"
-        int cloud_idx = base + tid; // Global cloud index for this thread in the current tile
-        if (cloud_idx < num_clouds) 
-            shared_clouds[tid] = d_clouds[cloud_idx]; // Each thread loads one cloud into shared memory
-        __syncthreads(); // Ensure all threads have loaded their cloud before processing
-
-        int tile_clouds = fminf(threads_per_block, num_clouds - base); // Number of clouds in the current tile (last tile may have fewer clouds)
-        if (in_bounds) {
-            // Compute rainfall contribution from each cloud in the tile
-            for (int cloud = 0; cloud < tile_clouds; cloud++) {
-                Cloud_t c_cloud = shared_clouds[cloud];
-                float intensity = c_cloud.intensity;
-                float sqrt_divr_intensity = c_cloud.sqrt_divr_intensity;
-                float dx = x_pos - c_cloud.x; // Distance in x-axis from cloud center to cell
-                float dy = y_pos - c_cloud.y; // Distance in y-axis from cloud center to cell
-                float dist2 = dx * dx + dy * dy;
-                float radius2 = c_cloud.radius * c_cloud.radius; // Square of the cloud's radius avoids sqrt for distance comparison
-
-                if (dist2 < radius2) { // If the cell is within the cloud's radius, compute rainfall contribution
-                    float distance = sqrtf(dist2);
-                    float rain = ex_factor * fmaxf(0.0f, intensity - distance / sqrt_divr_intensity);
-                    cell_rainfall += rain * rainscale;
-                }
-            }
-        }
-
-        __syncthreads();
-    }
-
-    if (!in_bounds)
+    if (row >= rows || col >= columns)
         return;
 
+    float x_pos = COORD_MAT2SCEN_X(col);
+    float y_pos = COORD_MAT2SCEN_Y(row);
+
+    float cell_rainfall = 0;
+
+    for (int cloud = 0; cloud < num_clouds; cloud++) {
+        Cloud_t c_cloud = d_clouds[cloud];
+        float cloud_x = c_cloud.x;
+        float cloud_y = c_cloud.y;
+        float cloud_radius = c_cloud.radius;
+        float cloud_intensity = c_cloud.intensity;
+
+        float distance =
+            sqrt(
+                (x_pos - cloud_x) * (x_pos - cloud_x) + (y_pos - cloud_y) * (y_pos - cloud_y)
+            );
+        if (distance < cloud_radius) {
+            /*
+            * The rainfall contribution of a cloud is computed as:
+            * rain = ex_factor * max(0, cloud_intensity - distance / cloud_radius * sqrt(cloud_intensity))
+            * r = ex * max(0, I - (d / R) * sqrt(I))
+            */
+            float rain = ex_factor *
+                        MAX(0, cloud_intensity - distance / cloud_radius * sqrt(cloud_intensity));
+            float meters_per_minute = rain / 1000 / 60;
+            cell_rainfall += meters_per_minute;
+        }
+    }
     accessMat(d_water_level, row, col) += FIXED(cell_rainfall);
     atomicAdd(d_total_rainfall, (unsigned long long)FIXED(cell_rainfall));
 }
@@ -215,17 +366,6 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
                                         float *d_spillage_level, float *d_spillage_from_neigh) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    /* Define the displacements for the four contiguous neighbor cells (up, down, left, right) 
-    * Improves runtime by 2 seconds
-    */
-    constexpr int continguous_cells = 4; // Number of contiguous neighbor cells (up, down, left, right)
-    constexpr int const_displacements[continguous_cells][2] = {
-        {-1, 0}, // Up
-        {1, 0},  // Down
-        {0, -1}, // Left
-        {0, 1}   // Right
-    };
 
     int cell_pos, new_row, new_col;
 
@@ -241,9 +381,9 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
             accessMat(d_ground, row, col) + FLOATING(accessMat(d_water_level, row, col));
 
         // Iterate over the four neighboring cells using the displacement array
-        for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-            new_row = row + const_displacements[cell_pos][0];
-            new_col = col + const_displacements[cell_pos][1];
+        for (cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
+            new_row = row + displacements[cell_pos][0];
+            new_col = col + displacements[cell_pos][1];
 
             float neighbor_height;
 
@@ -260,10 +400,10 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
             if (current_height >= neighbor_height) {
                 float height_diff = current_height - neighbor_height;
                 sum_diff += height_diff;
-                my_spillage_level = fmaxf(my_spillage_level, height_diff);
+                my_spillage_level = MAX(my_spillage_level, height_diff);
             }
         }
-        my_spillage_level = fminf(FLOATING(accessMat(d_water_level, row, col)), my_spillage_level);
+        my_spillage_level = MIN(FLOATING(accessMat(d_water_level, row, col)), my_spillage_level);
 
         // Compute proportion of spillage to each neighbor
         if (sum_diff > 0.0) {
@@ -274,9 +414,9 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
                 accessMat(d_spillage_level, row, col) = my_spillage_level;
 
                 // Iterate over the four neighboring cells using the displacement array
-                for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-                    new_row = row + const_displacements[cell_pos][0];
-                    new_col = col + const_displacements[cell_pos][1];
+                for (cell_pos = 0; cell_pos < 4; cell_pos++) {
+                    new_row = row + displacements[cell_pos][0];
+                    new_col = col + displacements[cell_pos][1];
 
                     float neighbor_height;
 
@@ -294,7 +434,7 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
                         neighbor_height = accessMat(d_ground, new_row, new_col) +
                                             FLOATING(accessMat(d_water_level, new_row, new_col));
                         if (current_height >= neighbor_height) {
-                            int depths = continguous_cells;
+                            int depths = CONTIGUOUS_CELLS;
                             accessMat3D(d_spillage_from_neigh, new_row, new_col, cell_pos) =
                                 proportion * (current_height - neighbor_height);
                         }
@@ -303,172 +443,6 @@ __global__ void compute_spillage_kernel(int rows, int columns, unsigned long lon
             }
         }
     }
-}
-// Tiling implementation only improves by ~0.2 seconds
-__global__ void alt_compute_spillage_kernel(int rows, int columns, unsigned long long *d_total_water_loss, float *d_ground, 
-                                        int *d_water_level, float *d_spillage_flag,
-                                        float *d_spillage_level, float *d_spillage_from_neigh) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    int in_bounds = (row < rows && col < columns);
-    int local_row = threadIdx.y + 1;
-    int local_col = threadIdx.x + 1;
-    int shared_width = blockDim.x + 2;
-    int shared_stride = shared_width;
-    extern __shared__ float shared_height[];
-
-    /* Define the displacements for the four contiguous neighbor cells (up, down, left, right) 
-    * Improves runtime by 2 seconds
-    */
-    constexpr int continguous_cells = 4; // Number of contiguous neighbor cells (up, down, left, right)
-    constexpr int const_displacements[continguous_cells][2] = {
-        {-1, 0}, // Up
-        {1, 0},  // Down
-        {0, -1}, // Left
-        {0, 1}   // Right
-    };
-
-    int cell_pos, new_row, new_col;
-
-    unsigned long long water_loss = 0;
-
-    float current_ground = 0.0f;
-    float current_height = 0.0f;
-
-    if (in_bounds) {
-        current_ground = accessMat(d_ground, row, col);
-        current_height = current_ground + FLOATING(accessMat(d_water_level, row, col));
-    }
-
-    // Center tile cell
-    accessMatStride(shared_height, shared_stride, local_row, local_col) = current_height;
-
-    // Left halo
-    if (threadIdx.x == 0) {
-        float left_height = 0.0f;
-        if (in_bounds) {
-            if (col > 0)
-                left_height = accessMat(d_ground, row, col - 1) + FLOATING(accessMat(d_water_level, row, col - 1));
-            else
-                left_height = current_ground;
-        }
-        accessMatStride(shared_height, shared_stride, local_row, 0) = left_height;
-    }
-
-    // Right halo
-    if (threadIdx.x == blockDim.x - 1) {
-        float right_height = 0.0f;
-        if (row < rows && col < columns) {
-            if (col + 1 < columns)
-                right_height =
-                    accessMat(d_ground, row, col + 1) + FLOATING(accessMat(d_water_level, row, col + 1));
-            else
-                right_height = current_ground;
-        }
-        accessMatStride(shared_height, shared_stride, local_row, local_col + 1) = right_height;
-    }
-
-    // Top halo
-    if (threadIdx.y == 0) {
-        float top_height = 0.0f;
-        if (in_bounds) {
-            if (row > 0)
-                top_height = accessMat(d_ground, row - 1, col) + FLOATING(accessMat(d_water_level, row - 1, col));
-            else
-                top_height = current_ground;
-        }
-        accessMatStride(shared_height, shared_stride, 0, local_col) = top_height;
-    }
-
-    // Bottom halo
-    if (threadIdx.y == blockDim.y - 1) {
-        float bottom_height = 0.0f;
-        if (row < rows && col < columns) {
-            if (row + 1 < rows)
-                bottom_height =
-                    accessMat(d_ground, row + 1, col) + FLOATING(accessMat(d_water_level, row + 1, col));
-            else
-                bottom_height = current_ground;
-        }
-        accessMatStride(shared_height, shared_stride, local_row + 1, local_col) = bottom_height;
-    }
-
-    __syncthreads();
-
-    if (!in_bounds)
-        return;
-
-    if (accessMat(d_water_level, row, col) > 0) {
-        float sum_diff = 0;
-        float my_spillage_level = 0;
-
-        // Iterate over the four neighboring cells using the displacement array
-        for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-            new_row = row + const_displacements[cell_pos][0];
-            new_col = col + const_displacements[cell_pos][1];
-
-            float neighbor_height;
-
-            // Check if the new position is within the matrix boundaries
-            if (new_row < 0 || new_row >= rows || new_col < 0 || new_col >= columns)
-                // Out of borders: Same height as the cell with no water
-                neighbor_height = current_ground;
-            else {
-                int neigh_local_row = local_row + const_displacements[cell_pos][0];
-                int neigh_local_col = local_col + const_displacements[cell_pos][1];
-                neighbor_height = accessMatStride(shared_height, shared_stride, neigh_local_row, neigh_local_col);
-            }
-
-            // Compute level differences
-            if (current_height >= neighbor_height) {
-                float height_diff = current_height - neighbor_height;
-                sum_diff += height_diff;
-                my_spillage_level = fmaxf(my_spillage_level, height_diff);
-            }
-        }
-        my_spillage_level = fminf(FLOATING(accessMat(d_water_level, row, col)), my_spillage_level);
-
-        // Compute proportion of spillage to each neighbor
-        if (sum_diff > 0.0) {
-            float proportion = my_spillage_level / sum_diff;
-            // If proportion is significative, spillage
-            if (proportion > 1e-8) {
-                accessMat(d_spillage_flag, row, col) = 1;
-                accessMat(d_spillage_level, row, col) = my_spillage_level;
-
-                // Iterate over the four neighboring cells using the displacement array
-                for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-                    new_row = row + const_displacements[cell_pos][0];
-                    new_col = col + const_displacements[cell_pos][1];
-
-                    float neighbor_height;
-
-                    // Check if the new position is within the matrix boundaries
-                    // Race condition
-                    if (new_row < 0 || new_row >= rows || new_col < 0 || new_col >= columns) {
-                        // Spillage out of the borders: Water loss
-                        neighbor_height = accessMat(d_ground, row, col);
-                        if (current_height >= neighbor_height) {
-                            water_loss += (unsigned long long)FIXED(proportion * (current_height - neighbor_height) / 2);
-                        }
-                    } else {
-                        // Spillage to a neighbor cell
-                        int neigh_local_row = local_row + const_displacements[cell_pos][0];
-                        int neigh_local_col = local_col + const_displacements[cell_pos][1];
-                        neighbor_height = accessMatStride(shared_height, shared_stride, neigh_local_row, neigh_local_col);
-                        if (current_height >= neighbor_height) {
-                            int depths = continguous_cells;
-                            accessMat3D(d_spillage_from_neigh, new_row, new_col, cell_pos) =
-                                proportion * (current_height - neighbor_height);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    if (water_loss > 0)
-        atomicAdd(d_total_water_loss, water_loss);
 }
 
 __global__ void compute_spillage_propagation_kernel(int rows, int columns, int *d_water_level, float *d_spillage_flag,
@@ -476,8 +450,6 @@ __global__ void compute_spillage_propagation_kernel(int rows, int columns, int *
                                                    int *d_max_spillage_iter) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    constexpr int continguous_cells = 4; // Number of contiguous neighbor cells (up, down, left, right)
 
     d_max_spillage_iter[0] = 0; // Reset max spillage for the iteration (fixed-point representation)
 
@@ -496,43 +468,10 @@ __global__ void compute_spillage_propagation_kernel(int rows, int columns, int *
     }
 
     // Accumulate spillage from neighbors
-    for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-        int depths = continguous_cells;
+    for (cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
+        int depths = CONTIGUOUS_CELLS;
         accessMat(d_water_level, row, col) +=
             FIXED(accessMat3D(d_spillage_from_neigh, row, col, cell_pos) / SPILLAGE_FACTOR);
-    }
-}
-
-__global__ void step3_kernel(
-    int *water_level,
-    float *spillage_flag,
-    float *spillage_level,
-    float *spillage_from_neigh,
-    int *max_spillage_iter,
-    int rows,
-    int columns
-) {
-    int row_pos = blockIdx.y * blockDim.y + threadIdx.y;
-    int col_pos = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (row_pos >= rows || col_pos >= columns) return;
-
-    int depths = CONTIGUOUS_CELLS;
-    int cell_pos;
-
-    if (accessMat(spillage_flag, row_pos, col_pos) == 1) {
-        accessMat(water_level, row_pos, col_pos) -=
-            FIXED(accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR);
-    }
-
-        // Compute termination condition: Maximum cell spillage during the iteration
-        // Note: atomic max works only for floats 
-        int current_spill = FIXED(accessMat(spillage_level, row_pos, col_pos) / SPILLAGE_FACTOR);
-        atomicMax(max_spillage_iter, current_spill); 
-
-    for (cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
-        accessMat(water_level, row_pos, col_pos) +=
-            FIXED(accessMat3D(spillage_from_neigh, row_pos, col_pos, cell_pos) / SPILLAGE_FACTOR);
     }
 }
 
@@ -550,8 +489,6 @@ __global__ void compute_private_spillage_propagation_kernel(
     int row_stride = blockDim.y * gridDim.y;
     int col_stride = blockDim.x * gridDim.x;
 
-    constexpr int continguous_cells = 4; // Number of contiguous neighbor cells (up, down, left, right)
-
 
     for (int r = row; r < rows; r += row_stride) {
         for (int c = col; c < columns; c += col_stride) {
@@ -568,8 +505,8 @@ __global__ void compute_private_spillage_propagation_kernel(
                 }
 
                 // Accumulate spillage from neighbors
-                for (int cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-                    int depths = continguous_cells;
+                for (int cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
+                    int depths = CONTIGUOUS_CELLS;
                     accessMat(d_water_level, r, c) +=
                         FIXED(accessMat3D(d_spillage_from_neigh, r, c, cell_pos) / SPILLAGE_FACTOR);
                 }
@@ -597,15 +534,13 @@ __global__ void reset_ancillary_structures_kernel(int rows, int columns, float *
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
-    constexpr int continguous_cells = 4; // Number of contiguous neighbor cells (up, down, left, right)
-
     int cell_pos;
 
     if (row >= rows || col >= columns)
         return;
 
-    for (cell_pos = 0; cell_pos < continguous_cells; cell_pos++) {
-        int depths = continguous_cells;
+    for (cell_pos = 0; cell_pos < CONTIGUOUS_CELLS; cell_pos++) {
+        int depths = CONTIGUOUS_CELLS;
         accessMat3D(d_spillage_from_neigh, row, col, cell_pos) = 0.0f;
     }
     accessMat(d_spillage_flag, row, col) = 0.0f;
@@ -652,7 +587,7 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     int *d_max_spillage_iter = NULL;
     int *d_water_level = NULL;
 
-    Cloud_t *d_clouds = NULL;
+    Cloud_soa_t d_clouds_soa = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     float *d_ground = NULL;
 
     float *d_spillage_flag = NULL;
@@ -683,7 +618,14 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_total_water_loss, sizeof(unsigned long long)));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_total_rainfall, sizeof(unsigned long long)));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_max_spillage_iter, sizeof(int)));
-    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds, sizeof(Cloud_t) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.x, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.y, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.radius, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.intensity, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.sqrt_divr_intensity, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.speed, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.angle, sizeof(float) * (size_t)p->num_clouds));
+    CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_clouds_soa.active, sizeof(int) * (size_t)p->num_clouds));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_water_level, sizeof(int) * cell_count));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_flag, sizeof(float) * cell_count));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_level, sizeof(float) * cell_count));
@@ -691,10 +633,17 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
 
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_ground, h_ground, sizeof(float) * cell_count, cudaMemcpyHostToDevice));
-    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds, p->clouds, sizeof(Cloud_t) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.x, p->clouds_soa.x, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.y, p->clouds_soa.y, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.radius, p->clouds_soa.radius, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.intensity, p->clouds_soa.intensity, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.sqrt_divr_intensity, p->clouds_soa.sqrt_divr_intensity, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.speed, p->clouds_soa.speed, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.angle, p->clouds_soa.angle, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
+    CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.active, p->clouds_soa.active, sizeof(int) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
 
 
-    dim3 block(16, 8); // Adjust for GPU architecture and problem size
+    dim3 block(32, 8); // Adjust for GPU architecture and problem size
     dim3 grid((columns + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
     init_state_kernel<<<grid, block>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level,
                                        d_spillage_from_neigh);
@@ -719,24 +668,54 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
         /* Step 1: Cloud movement and rainfall */
         /* Step 1.1: Cloud movement */
-        cloud_movement_kernel<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(p->num_clouds, d_clouds);
+        cloud_movement_kernel_soa<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(
+            p->num_clouds, d_clouds_soa.x, d_clouds_soa.y, d_clouds_soa.speed, d_clouds_soa.angle,
+            d_clouds_soa.active);
         CUDA_CHECK_KERNEL();
         //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
 #ifdef DEBUG
 #ifndef ANIMATION
         CUDA_CHECK_FUNCTION(
-            cudaMemcpy(p->clouds, d_clouds, sizeof(Cloud_t) * (size_t)p->num_clouds, cudaMemcpyDeviceToHost));
+            cudaMemcpy(p->clouds_soa.x, d_clouds_soa.x, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyDeviceToHost));
+        CUDA_CHECK_FUNCTION(
+            cudaMemcpy(p->clouds_soa.y, d_clouds_soa.y, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyDeviceToHost));
+        for (int cloud = 0; cloud < p->num_clouds; cloud++) {
+            p->clouds[cloud].x = p->clouds_soa.x[cloud];
+            p->clouds[cloud].y = p->clouds_soa.y[cloud];
+        }
         print_clouds(p->num_clouds, p->clouds);
 #endif
 #endif
 
         /* Step 1.2: Rainfall */
-        //CUDA_CHECK_FUNCTION(cudaMemset(d_total_rainfall, 0, sizeof(unsigned long long)));
-        size_t rainfall_shared_mem = (size_t)(block.x * block.y) * sizeof(Cloud_t);
-        alt_calc_rainfall_kernel<<<grid, block, rainfall_shared_mem>>>(rows, columns, p->num_clouds,
-                                           d_total_rainfall, d_clouds, p->ex_factor,
-                                           d_water_level);
+        // For small cloud counts, use constant-memory broadcast path; otherwise use tiled shared-memory path.
+        if (p->num_clouds <= RAIN_CONST_FASTPATH_CLOUDS && p->num_clouds <= RAIN_CONST_MAX_CLOUDS) {
+            size_t cloud_bytes = sizeof(float) * (size_t)p->num_clouds;
+            size_t active_bytes = sizeof(int) * (size_t)p->num_clouds;
+            CUDA_CHECK_FUNCTION(cudaMemcpyToSymbol(c_rain_cloud_x, d_clouds_soa.x, cloud_bytes, 0,
+                                                   cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_FUNCTION(cudaMemcpyToSymbol(c_rain_cloud_y, d_clouds_soa.y, cloud_bytes, 0,
+                                                   cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_FUNCTION(cudaMemcpyToSymbol(c_rain_cloud_radius, d_clouds_soa.radius, cloud_bytes, 0,
+                                                   cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_FUNCTION(cudaMemcpyToSymbol(c_rain_cloud_intensity, d_clouds_soa.intensity, cloud_bytes, 0,
+                                                   cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_FUNCTION(cudaMemcpyToSymbol(c_rain_cloud_sqrt_divr, d_clouds_soa.sqrt_divr_intensity,
+                                                   cloud_bytes, 0, cudaMemcpyDeviceToDevice));
+            CUDA_CHECK_FUNCTION(cudaMemcpyToSymbol(c_rain_cloud_active, d_clouds_soa.active, active_bytes, 0,
+                                                   cudaMemcpyDeviceToDevice));
+
+            alt_calc_rainfall_kernel_soa_const<<<grid, block>>>(rows, columns, p->num_clouds,
+                                                                 d_total_rainfall, p->ex_factor,
+                                                                 d_water_level);
+        } else {
+            size_t rainfall_shared_mem = (size_t)(block.x * block.y) * (5 * sizeof(float) + sizeof(int));
+            alt_calc_rainfall_kernel_soa<<<grid, block, rainfall_shared_mem>>>(
+                rows, columns, p->num_clouds, d_total_rainfall, d_clouds_soa.x, d_clouds_soa.y,
+                d_clouds_soa.radius, d_clouds_soa.intensity, d_clouds_soa.sqrt_divr_intensity,
+                d_clouds_soa.active, p->ex_factor, d_water_level);
+        }
         //alternative_rainfall_kernel<<<grid, block>>>(rows, columns, p->num_clouds, d_total_rainfall, d_clouds, p->ex_factor, d_water_level);
         //rainfall_kernel<<<(p->num_clouds + block.x - 1) / block.x, block.x>>>(p->num_clouds, d_total_rainfall, d_clouds, rows, columns, p->ex_factor, d_water_level);
         CUDA_CHECK_KERNEL();
@@ -747,25 +726,20 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     print_matrix(PRECISION_FIXED, rows, columns, h_water_level, "Water after rain");
 #endif
         /* Step 2: Compute candidate spillage to neighbors. */
-        // compute_spillage_kernel<<<grid, block>>>(rows, columns, d_total_water_loss, d_ground, d_water_level, d_spillage_flag,
-        //                                          d_spillage_level, d_spillage_from_neigh);
-        size_t spillage_shared_mem = (size_t)(block.x + 2) * (block.y + 2) * sizeof(float);
-        alt_compute_spillage_kernel<<<grid, block, spillage_shared_mem>>>(rows, columns, d_total_water_loss, d_ground,
-                                           d_water_level, d_spillage_flag,
-                                           d_spillage_level, d_spillage_from_neigh);
+        compute_spillage_kernel<<<grid, block>>>(rows, columns, d_total_water_loss, d_ground, d_water_level, d_spillage_flag,
+                                                 d_spillage_level, d_spillage_from_neigh);
 
         CUDA_CHECK_KERNEL();
         //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
         /* Step 3: Propagation of previously computer water spillage to/from neighbors */
-        // h_max_spillage_iter = 0;
-        // CUDA_CHECK_FUNCTION(cudaMemcpy(d_max_spillage_iter, &h_max_spillage_iter, sizeof(int), cudaMemcpyHostToDevice));
+        CUDA_CHECK_FUNCTION(cudaMemset(d_max_spillage_iter, 0, sizeof(int)));
 
-        compute_spillage_propagation_kernel<<<grid, block>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
-                                    d_max_spillage_iter);
+        // compute_spillage_propagation_kernel<<<grid, block>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
+        //                             d_max_spillage_iter);
         
-        // compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
-        //                                             d_max_spillage_iter);
+        compute_private_spillage_propagation_kernel<<<grid, block, block.x * block.y * sizeof(int)>>>(rows, columns, d_water_level, d_spillage_flag, d_spillage_level, d_spillage_from_neigh,
+                                                    d_max_spillage_iter);
         CUDA_CHECK_KERNEL();
         //CUDA_CHECK_FUNCTION(cudaDeviceSynchronize());
 
@@ -828,7 +802,14 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 
     CUDA_CHECK_FUNCTION(cudaFree(d_ground));
     CUDA_CHECK_FUNCTION(cudaFree(d_total_water_loss));
-    CUDA_CHECK_FUNCTION(cudaFree(d_clouds));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.x));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.y));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.radius));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.intensity));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.sqrt_divr_intensity));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.speed));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.angle));
+    CUDA_CHECK_FUNCTION(cudaFree(d_clouds_soa.active));
     CUDA_CHECK_FUNCTION(cudaFree(d_water_level));
     CUDA_CHECK_FUNCTION(cudaFree(d_total_rainfall));
     CUDA_CHECK_FUNCTION(cudaFree(d_spillage_flag));

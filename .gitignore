@@ -40,6 +40,10 @@ _logs/
 *~
 .DS_Store
 
+# Log files
+*.log
+*.txt
+
 # CMake
 CMakeFiles/
 cmake_install.cmake
@@ -54,6 +58,3 @@ callgrind.out.*
 flood_cuda
 flood_cuda_soa
 flood_seq
-
-#text files
-*.txt
