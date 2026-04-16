@@ -1,7 +1,0 @@
-Starting CUDA version with 90 rows and 90 columns
-
-Time: 0.043623
-Result: 350, 55,   1.093814,  11.167553, 7373.742676, 5309.647461, 2063.280518
-
-Check precision loss:   0.814697
-
