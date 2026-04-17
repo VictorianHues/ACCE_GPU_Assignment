@@ -1,4 +1,4 @@
-#!/bin/bash
+defqsdf#!/bin/bash
 #SBATCH --job-name=flood_cuda
 #SBATCH --output=_logs/flood_output_%j.txt
 #SBATCH --error=_logs/flood_error_%j.txt
@@ -11,4 +11,3 @@
 
 ## This is an example of a SLURM job script to run the program on a GPU node
 nvprof ./flood_cuda $(< test_files/large_mountains.in)
-nvprof ./flood_cuda_soa $(< test_files/large_mountains.in)
