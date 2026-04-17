@@ -2,7 +2,7 @@
 #SBATCH --job-name=batch_experiments
 #SBATCH --output=_logs/batch_experiments_out_%j.txt
 #SBATCH --error=_logs/batch_experiments_err_%j.txt
-#SBATCH --time=05:00:00
+#SBATCH --time=24:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --partition=defq
@@ -14,7 +14,7 @@ set -euo pipefail
 BINS=("flood_seq" "flood_cuda" "flood_cuda_soa")
 INPUTS=(test_files/*.in)
 OUTCSV="_logs/experiment_results.csv"
-RUNS=100
+RUNS=10
 
 echo "run,binary,input_file,minute,max_spillage_minute,max_spillage_scenario,max_water_scenario,total_rain,total_water,total_water_loss,precision_loss,runtime" > "$OUTCSV"
 
