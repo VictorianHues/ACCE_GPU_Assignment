@@ -252,7 +252,7 @@ __global__ void alt_calc_rainfall_kernel_lekker(int rows, int columns, int num_c
         __syncthreads();
     }
 
-    if (!in_bounds)
+    if (cell_rainfall == 0.0f)
         return;
 
     accessMat(d_water_level, row, col) += FIXED(cell_rainfall);
