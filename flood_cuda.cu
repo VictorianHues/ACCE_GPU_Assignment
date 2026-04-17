@@ -235,7 +235,8 @@ __global__ void alt_calc_rainfall_kernel_lekker(int rows, int columns, int num_c
 
     for (int base = 0; base < num_clouds; base += threads_per_block) { // Iterate over clouds in tiles "strides"
         int cloud_idx = base + tid; // Global cloud index for this thread in the current tile
-        shared_clouds[tid] = d_clouds[int(fminf(cloud_idx, num_clouds - 1))];
+        if (cloud_idx < num_clouds)
+            shared_clouds[tid] = d_clouds[cloud_idx]; // Each thread loads one cloud into shared memory
         __syncthreads(); // Ensure all threads have loaded their cloud before processing
 
         int tile_clouds = fminf(threads_per_block, num_clouds - base); // Number of clouds in the current tile (last tile may have fewer clouds)
