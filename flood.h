@@ -26,6 +26,13 @@
 #define SPILLAGE_FACTOR 2
 
 /*
+ * Block dimensions
+ */
+#define BLOCK_X 16
+#define BLOCK_Y 8
+#define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
+
+/*
  * Structure to represent moving rainy clouds
  * This structure can be changed and/or optimized by the students
  */
@@ -34,10 +41,22 @@ typedef struct {
     float y;         // y coordinate of the center
     float radius;    // radius of the cloud (km)
     float intensity; // rainfall intensity (cm/h)
+    float sqrt_divr_intensity; // square root of the division between intensity and radius, precomputed for optimization
     float speed;     // speed of movement (km/h)
     float angle;     // angle of movement
     int active;      // active cloud
 } Cloud_t;
+
+typedef struct {
+    float *x;         // x coordinate of the center
+    float *y;         // y coordinate of the center
+    float *radius;    // radius of the cloud (km)
+    float *intensity; // rainfall intensity (cm/h)
+    float *sqrt_divr_intensity; // square root of the division between intensity and radius, precomputed for optimization
+    float *speed;     // speed of movement (km/h)
+    float *angle;     // angle of movement
+    int *active;      // active cloud
+} Cloud_soa_t;
 
 struct parameters {
     int rows;
@@ -49,6 +68,7 @@ struct parameters {
     int num_clouds;
     float *ground;
     Cloud_t *clouds;
+    Cloud_soa_t clouds_soa;
     int final_matrix;
 };
 
@@ -72,6 +92,7 @@ double get_time();
 void print_matrix(int precision_type, int rows, int columns, void *mat, const char *msj);
 #ifdef DEBUG
 void print_clouds(int num_clouds, Cloud_t *clouds);
+void print_clouds(int num_clouds, Cloud_soa_t clouds_soa);
 #endif // DEBUG
 #ifdef __CUDACC__
 }
@@ -109,6 +130,12 @@ __device__
 #define COORD_MAT2SCEN_X(c) (c * SCENARIO_SIZE / columns)
 #define COORD_MAT2SCEN_Y(r) (r * SCENARIO_SIZE / rows)
 
+#define COORD_SCEN2MAT_X_ALT(x) fminf((x * columns / SCENARIO_SIZE), columns)
+#define COORD_SCEN2MAT_Y_ALT(y) fminf((y * rows / SCENARIO_SIZE), rows)
+#define COORD_MAT2SCEN_X_ALT(c) fminf((c * SCENARIO_SIZE / columns), SCENARIO_SIZE)
+#define COORD_MAT2SCEN_Y_ALT(r) fminf((r * SCENARIO_SIZE / rows), SCENARIO_SIZE)
+
+
 /*
  * Utils: Macro functions for the min and max of two numbers
  * 	These macro-functions can be changed and/or optimized by the students
@@ -121,6 +148,9 @@ __device__
  * 	These macro-functions can be changed and/or optimized by the students
  */
 #define accessMat(arr, exp1, exp2) arr[(int)(exp1) * columns + (int)(exp2)]
+#define accessMatStride(arr, stride, exp1, exp2) arr[(int)(exp1) * (int)(stride) + (int)(exp2)]
 #define accessMat3D(arr, exp1, exp2, exp3) arr[((int)(exp1) * columns * depths) + ((int)(exp2) * depths) + (int)(exp3)]
+#define accessMat3DStride(arr, stride1, stride2, exp1, exp2, exp3) \
+    arr[((int)(exp1) * (int)(stride1) * (int)(stride2)) + ((int)(exp2) * (int)(stride2)) + (int)(exp3)]
 
 #endif

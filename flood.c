@@ -194,9 +194,50 @@ Cloud_t cloud_init(Cloud_t cloud_model, float front_distance, float front_width,
     // Cloud random parameters
     cloud.radius = (float)rng_next_between(rnd_state, cloud_model.radius / 2, cloud_model.radius);
     cloud.intensity = (float)rng_next_between(rnd_state, cloud_model.intensity / 2, cloud_model.intensity);
+    cloud.sqrt_divr_intensity = sqrt(cloud.intensity) / cloud.radius;
     cloud.speed = (float)rng_next_between(rnd_state, cloud_model.speed / 2, cloud_model.speed);
     cloud.angle = front_direction + (float)rng_next_between(rnd_state, 0, cloud_model.angle) - cloud_model.angle / 2;
     cloud.active = 1;
+    return cloud;
+}
+
+Cloud_soa_t cloud_init_soa(const Cloud_t *clouds, int num_clouds) {
+    Cloud_soa_t cloud = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+
+    cloud.x = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.y = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.radius = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.intensity = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.sqrt_divr_intensity = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.speed = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.angle = (float *)malloc(sizeof(float) * (size_t)num_clouds);
+    cloud.active = (int *)malloc(sizeof(int) * (size_t)num_clouds);
+
+    if (cloud.x == NULL || cloud.y == NULL || cloud.radius == NULL || cloud.intensity == NULL ||
+        cloud.sqrt_divr_intensity == NULL || cloud.speed == NULL || cloud.angle == NULL || cloud.active == NULL) {
+        fprintf(stderr, "-- Error allocating cloud SoA structures for size: %d\n", num_clouds);
+        free(cloud.x);
+        free(cloud.y);
+        free(cloud.radius);
+        free(cloud.intensity);
+        free(cloud.sqrt_divr_intensity);
+        free(cloud.speed);
+        free(cloud.angle);
+        free(cloud.active);
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < num_clouds; i++) {
+        cloud.x[i] = clouds[i].x;
+        cloud.y[i] = clouds[i].y;
+        cloud.radius[i] = clouds[i].radius;
+        cloud.intensity[i] = clouds[i].intensity;
+        cloud.sqrt_divr_intensity[i] = sqrt(clouds[i].intensity) / clouds[i].radius;
+        cloud.speed[i] = clouds[i].speed;
+        cloud.angle[i] = clouds[i].angle;
+        cloud.active[i] = clouds[i].active;
+    }
+
     return cloud;
 }
 
@@ -325,6 +366,8 @@ int main(int argc, char *argv[]) {
     p.num_clouds += num_clouds_arg;
     p.clouds = clouds;
 
+    p.clouds_soa = cloud_init_soa(clouds, p.num_clouds);
+
 #ifdef ANIMATION
     // Animation mode always generate the data for all the iterations
     p.threshold = -INFINITY;
@@ -344,6 +387,14 @@ int main(int argc, char *argv[]) {
 
     /* Free resources */
     free(clouds);
+    free(p.clouds_soa.x);
+    free(p.clouds_soa.y);
+    free(p.clouds_soa.radius);
+    free(p.clouds_soa.intensity);
+    free(p.clouds_soa.sqrt_divr_intensity);
+    free(p.clouds_soa.speed);
+    free(p.clouds_soa.angle);
+    free(p.clouds_soa.active);
 
 #ifndef ANIMATION
     /* Output stats */
