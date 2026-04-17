@@ -221,12 +221,8 @@ __global__ void alt_calc_rainfall_kernel_lekker(int rows, int columns, int num_c
 
     int in_bounds = (row < rows && col < columns);
 
-    float x_pos = 0.0f;
-    float y_pos = 0.0f;
-    if (in_bounds) { // Compute scenario coordinates for the cell (only for threads that will process rainfall)
-        x_pos = COORD_MAT2SCEN_X(col);
-        y_pos = COORD_MAT2SCEN_Y(row);
-    }
+    float x_pos = x_pos = COORD_MAT2SCEN_X_ALT(col);
+    float y_pos = y_pos = COORD_MAT2SCEN_Y_ALT(row);
 
     extern __shared__ Cloud_t shared_clouds[]; // Shared memory for a tile of clouds
 
