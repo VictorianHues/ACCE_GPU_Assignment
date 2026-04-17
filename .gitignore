@@ -62,3 +62,4 @@ flood_seq
 # Project Files
 report/
 *.txt
+./test_files/*
