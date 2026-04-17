@@ -8,17 +8,17 @@ import os
 
 # Parameter sweeps
 rows_cols = [
-    (128, 128), (512, 512), (2048, 512), (512, 2048), (8192, 8192)
+    (128, 128), (512, 512), (2048, 2048), (4096, 4096), (8192, 8192)
 ]
 scenarios = ['M', 'V', 'D', 'd']
 num_clouds_list = [4, 32, 256, 1024]
 ex_factors = [10, 100]
 thresholds = [1e-7]
 num_minutes = [1000]
-cloud_max_radius = [10, 50]
-cloud_max_intensity = [30]
-cloud_max_speed = [30, 60]
-cloud_max_angle = [15, 45]
+cloud_max_radius = [50]
+cloud_max_intensity = [80]
+cloud_max_speed = [60]
+cloud_max_angle = [45]
 cloud_seed = 12345
 
 # Fixed cloud front parameters (can be randomized if desired)

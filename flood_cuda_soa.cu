@@ -169,7 +169,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     }
 
     // Allocate shared memory for reduction
-    __shared__ unsigned long long s_rain[BLOCK_SIZE];
+    __shared__ unsigned long long s_rain[BLOCK_SIZE]; // Shared memory for rainfall reduction (one element per thread)
     s_rain[tid] = fixed_rain;
     __syncthreads(); // Ensure all threads have written their rainfall to shared memory before reduction
 
@@ -183,7 +183,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     }
 
     // Only one thread per block updates the global total
-    if (tid == 0 && s_rain[0] > 0) {
+    if (tid == 0 && s_rain[0] > 0) { // Avoid atomicAdd if there is no rainfall in the block
         atomicAdd(d_total_rainfall, s_rain[0]);
     }
 }
