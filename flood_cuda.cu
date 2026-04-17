@@ -68,13 +68,14 @@ __global__ void init_state_kernel(int rows, int columns, int *d_water_level, flo
 }
 
 __global__ void cloud_movement(
-    int *p->num_clouds // or maybe I should pass only p?
+    int num_clouds, 
+    Cloud_t *d_clouds
 ){
     // each thread must be assigned a separate cloud to compute
     // this way we are waisting some of the threads - we only use first 
     cloud = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (cloud > p->num_clouds) return;
+    if (cloud >= p->num_clouds) return;
 
     /* Step 1.1: Clouds movement */
     // Calculate new position (x are rows, y are columns)
@@ -83,8 +84,6 @@ __global__ void cloud_movement(
     c_cloud->x += km_minute * cos(c_cloud->angle * M_PI / 180.0);
     c_cloud->y += km_minute * sin(c_cloud->angle * M_PI / 180.0);
 }
-
-
 
 
 __global__ void cloud_movement_kernel(int num_clouds, Cloud_t *d_clouds) {
