@@ -240,19 +240,17 @@ __global__ void alt_calc_rainfall_kernel_lekker(int rows, int columns, int num_c
         __syncthreads(); // Ensure all threads have loaded their cloud before processing
 
         int tile_clouds = fminf(threads_per_block, num_clouds - base); // Number of clouds in the current tile (last tile may have fewer clouds)
-        if (in_bounds) {
-            // Compute rainfall contribution from each cloud in the tile
-            for (int cloud = 0; cloud < tile_clouds; cloud++) {
-                Cloud_t c_cloud = shared_clouds[cloud];
-                float intensity = c_cloud.intensity;
-                float sqrt_divr_intensity = c_cloud.sqrt_divr_intensity;
-                float dx = x_pos - c_cloud.x; // Distance in x-axis from cloud center to cell
-                float dy = y_pos - c_cloud.y; // Distance in y-axis from cloud center to cell
-                float distance = sqrtf(dx * dx + dy * dy);
+        // Compute rainfall contribution from each cloud in the tile
+        for (int cloud = 0; cloud < tile_clouds; cloud++) {
+            Cloud_t c_cloud = shared_clouds[cloud];
+            float intensity = c_cloud.intensity;
+            float sqrt_divr_intensity = c_cloud.sqrt_divr_intensity;
+            float dx = x_pos - c_cloud.x; // Distance in x-axis from cloud center to cell
+            float dy = y_pos - c_cloud.y; // Distance in y-axis from cloud center to cell
+            float distance = sqrtf(dx * dx + dy * dy);
 
-                int is_impact = (distance < c_cloud.radius);
-                cell_rainfall += fmaxf(0.0f, intensity - distance * sqrt_divr_intensity) * rainscale * in_bounds * is_impact;
-            }
+            int is_impact = (distance < c_cloud.radius);
+            cell_rainfall += fmaxf(0.0f, intensity - distance * sqrt_divr_intensity) * rainscale * in_bounds * is_impact;
         }
 
         __syncthreads();
