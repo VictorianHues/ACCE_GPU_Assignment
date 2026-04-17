@@ -130,6 +130,12 @@ __device__
 #define COORD_MAT2SCEN_X(c) (c * SCENARIO_SIZE / columns)
 #define COORD_MAT2SCEN_Y(r) (r * SCENARIO_SIZE / rows)
 
+#define COORD_SCEN2MAT_X_ALT(x) std::min((x * columns / SCENARIO_SIZE), columns)
+#define COORD_SCEN2MAT_Y_ALT(y) std::min((y * rows / SCENARIO_SIZE), rows)
+#define COORD_MAT2SCEN_X_ALT(c) std::min((c * SCENARIO_SIZE / columns), SCENARIO_SIZE)
+#define COORD_MAT2SCEN_Y_ALT(r) std::min((r * SCENARIO_SIZE / rows), SCENARIO_SIZE)
+
+
 /*
  * Utils: Macro functions for the min and max of two numbers
  * 	These macro-functions can be changed and/or optimized by the students

@@ -210,6 +210,54 @@ __global__ void alt_calc_rainfall_kernel(int rows, int columns, int num_clouds,
     atomicAdd(d_total_rainfall, (unsigned long long)FIXED(cell_rainfall));
 }
 
+
+__global__ void alt_calc_rainfall_kernel_v2(int rows, int columns, int num_clouds,
+                                            unsigned long long *d_total_rainfall, Cloud_t *d_clouds,
+                                            float ex_factor, int *d_water_level) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    int threads_per_block = blockDim.x * blockDim.y; // Tile size for cloud processing
+
+    int in_bounds = (row < rows && col < columns);
+
+    float x_pos = COORD_MAT2SCEN_X_ALT(col);
+    float y_pos = COORD_MAT2SCEN_Y_ALT(row);
+
+    extern __shared__ Cloud_t shared_clouds[]; // Shared memory for a tile of clouds
+
+    float cell_rainfall = 0.0f;
+    float rainscale = ex_factor / 1000.0f / 60.0f; // Precompute the constant part of the rainfall contribution
+
+    for (int base = 0; base < num_clouds; base += threads_per_block) { // Iterate over clouds in tiles "strides"
+        int cloud_idx = base + tid; // Global cloud index for this thread in the current tile
+        shared_clouds[tid] = d_clouds[fminf(cloud_idx, num_clouds - 1)];
+        __syncthreads(); // Ensure all threads have loaded their cloud before processing
+
+        int tile_clouds = fminf(threads_per_block, num_clouds - base); // Number of clouds in the current tile (last tile may have fewer clouds)
+        // Compute rainfall contribution from each cloud in the tile
+        for (int cloud = 0; cloud < tile_clouds; cloud++) {
+            Cloud_t c_cloud = shared_clouds[cloud];
+            float intensity = c_cloud.intensity;
+            float sqrt_divr_intensity = c_cloud.sqrt_divr_intensity;
+            float dx = x_pos - c_cloud.x; // Distance in x-axis from cloud center to cell
+            float dy = y_pos - c_cloud.y; // Distance in y-axis from cloud center to cell
+            float distance = sqrtf(dx * dx + dy * dy);
+
+            int is_impact = (distance < c_cloud.radius);
+            cell_rainfall += fmaxf(0.0f, intensity - distance * sqrt_divr_intensity) * rainscale * in_bounds * is_impact;
+        }
+
+        __syncthreads();
+    }
+
+    accessMat(d_water_level, row, col) += FIXED(cell_rainfall);
+    atomicAdd(d_total_rainfall, (unsigned long long)FIXED(cell_rainfall));
+}
+
+
+
 __global__ void compute_spillage_kernel(int rows, int columns, unsigned long long *d_total_water_loss, float *d_ground, 
                                         int *d_water_level, float *d_spillage_flag,
                                         float *d_spillage_level, float *d_spillage_from_neigh) {
