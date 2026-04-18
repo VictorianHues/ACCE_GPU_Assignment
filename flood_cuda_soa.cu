@@ -99,16 +99,10 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int threads_per_block = blockDim.x * blockDim.y;
 
-    int in_bounds = (row < rows && col < columns);
-    float x_pos = 0.0f;
-    float y_pos = 0.0f;
-
     // Precompute the scenario coordinates for the cell
-    // Avoids deadlock due to __syncthreads() when threads are out of bounds
-    if (in_bounds) {
-        x_pos = COORD_MAT2SCEN_X(col);
-        y_pos = COORD_MAT2SCEN_Y(row);
-    }
+    int in_bounds = (row < rows && col < columns);
+    float x_pos = COORD_MAT2SCEN_X_ALT(col);
+    float y_pos = COORD_MAT2SCEN_Y_ALT(row);
 
     // Allocate shared memory for cloud properties (SoA format)
     __shared__ float shared_cloud_x[BLOCK_SIZE];
@@ -159,19 +153,17 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
         
         // Number of clouds in the current tile (can be less than block size only in last tile)
         int tile_clouds = MIN(threads_per_block, num_clouds - i);
-        if (in_bounds) {
-            for (int cloud = 0; cloud < tile_clouds; cloud++) { // Iterate through the tile of clouds
-                if (shared_cloud_active[cloud] * shared_cloud_block_coverage[cloud] == 0)
-                    continue;
+        for (int cloud = 0; cloud < tile_clouds; cloud++) { // Iterate through the tile of clouds
+            if (shared_cloud_active[cloud] * shared_cloud_block_coverage[cloud] == 0)
+                continue;
 
-                float dx = x_pos - shared_cloud_x[cloud];
-                float dy = y_pos - shared_cloud_y[cloud];
-                float dist = sqrt(dx * dx + dy * dy);
-                float cloud_radius = shared_cloud_radius[cloud];
-                int is_impact = (dist < cloud_radius);
-                float rain = fmaxf(0.0f, shared_cloud_intensity[cloud] - dist * shared_cloud_sqrt_divr[cloud]) * is_impact;
-                cell_rainfall += rain_scale * rain;
-            }
+            float dx = x_pos - shared_cloud_x[cloud];
+            float dy = y_pos - shared_cloud_y[cloud];
+            float dist = sqrt(dx * dx + dy * dy);
+            float cloud_radius = shared_cloud_radius[cloud];
+            int is_impact = (dist < cloud_radius);
+            float rain = fmaxf(0.0f, shared_cloud_intensity[cloud] - dist * shared_cloud_sqrt_divr[cloud]) * is_impact * in_bounds;
+            cell_rainfall += rain_scale * rain;
         }
 
         __syncthreads();
