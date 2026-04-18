@@ -163,7 +163,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     }
 
     unsigned long long fixed_rain = 0;
-    if (in_bounds) {
+    if (cell_rainfall != 0.0f) {
         fixed_rain = (unsigned long long)FIXED(cell_rainfall);
         accessMat(d_water_level, row, col) += (int)fixed_rain;
     }
