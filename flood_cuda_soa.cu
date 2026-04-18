@@ -166,16 +166,11 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
 
                 float dx = x_pos - shared_cloud_x[cloud];
                 float dy = y_pos - shared_cloud_y[cloud];
-                float dist2 = dx * dx + dy * dy;
+                float dist = sqrt(dx * dx + dy * dy);
                 float cloud_radius = shared_cloud_radius[cloud];
-                float radius2 = cloud_radius * cloud_radius; // Squaring is faster than sqrt, so we compare squared distances
-
-                if (dist2 < radius2) {
-                    float distance = sqrtf(dist2);
-                    float rain =
-                        fmaxf(0.0f, shared_cloud_intensity[cloud] - distance * shared_cloud_sqrt_divr[cloud]);
-                    cell_rainfall += rain_scale * rain;
-                }
+                int is_impact = (dist < cloud_radius);
+                float rain = fmaxf(0.0f, shared_cloud_intensity[cloud] - dist * shared_cloud_sqrt_divr[cloud]) * is_impact;
+                cell_rainfall += rain_scale * rain;
             }
         }
 
