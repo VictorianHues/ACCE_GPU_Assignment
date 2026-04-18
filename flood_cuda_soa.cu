@@ -117,7 +117,6 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     __shared__ float shared_cloud_intensity[BLOCK_SIZE];
     __shared__ float shared_cloud_sqrt_divr[BLOCK_SIZE];
     __shared__ int shared_cloud_active[BLOCK_SIZE];
-    __shared__ int shared_cloud_block_coverage[BLOCK_SIZE];
 
     float cell_rainfall = 0.0f;
     float rain_scale = ex_factor / 60000.0f; // Precompute the scaling factor for rain contribution (ex_factor / 1000 / 60)
@@ -133,26 +132,6 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
             shared_cloud_intensity[tid] = d_cloud_intensity[cloud_idx];
             shared_cloud_sqrt_divr[tid] = d_cloud_sqrt_divr_intensity[cloud_idx];
             shared_cloud_active[tid] = d_cloud_active[cloud_idx];
-
-            // Check whether any cell in in the block can be impacted by the cloud:
-            // Method: calculate whether the cloud area overlaps with the circle written around the block
-
-            // 1.1 Calculate the circle radius
-            float x_side = COORD_MAT2SCEN_X(blockIdx.x * blockDim.x) - COORD_MAT2SCEN_X(blockIdx.x * blockDim.x + blockDim.x);
-            float y_side = COORD_MAT2SCEN_Y(blockIdx.y * blockDim.y) - COORD_MAT2SCEN_Y(blockIdx.y * blockDim.y + blockDim.y);
-            float block_radius = 1.43 * MAX(x_side, y_side) * 0.5;  // (Over) Estimation with 45 degree -> srqt(2) -> 1.43
-
-            // 1.2 Calculate the distance of the block and the cloud centers
-            float x_dist = shared_cloud_x[tid] - COORD_MAT2SCEN_X(blockIdx.x * blockDim.x + blockDim.x / 2);
-            float y_dist = shared_cloud_y[tid] - COORD_MAT2SCEN_Y(blockIdx.y * blockDim.y + blockDim.y / 2);
-            float center_distance = MAX(x_dist, y_dist);  // (Under) Estimation by taking the larger side of the rectangle
-
-            // 1.3 Subtract the circle radius from the distance of rectangle block's center
-            float block_cloud_dist = center_distance - block_radius;
-
-            // 1.4 Check whether the remainder is longer or equal then the radius of the cloud
-            shared_cloud_block_coverage[tid] = (block_cloud_dist < shared_cloud_radius[tid]);
-
         } else {
             shared_cloud_active[tid] = 0;
         }
@@ -162,7 +141,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
         int tile_clouds = MIN(threads_per_block, num_clouds - i);
         if (in_bounds) {
             for (int cloud = 0; cloud < tile_clouds; cloud++) { // Iterate through the tile of clouds
-                if (shared_cloud_active[cloud] * shared_cloud_block_coverage[cloud] == 0)
+                if (shared_cloud_active[cloud] == 0)
                     continue;
 
                 float dx = x_pos - shared_cloud_x[cloud];
