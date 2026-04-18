@@ -150,12 +150,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
                 float cloud_radius = shared_cloud_radius[cloud];
                 float radius2 = cloud_radius * cloud_radius; // Squaring is faster than sqrt, so we compare squared distances
 
-                if (dist2 < radius2) {
-                    float distance = sqrtf(dist2);
-                    float rain =
-                        fmaxf(0.0f, shared_cloud_intensity[cloud] - distance * shared_cloud_sqrt_divr[cloud]);
-                    cell_rainfall += rain_scale * rain;
-                }
+                cell_rainfall += (dist2 >= radius2) ? 0.0f : fmaxf(0.0f, shared_cloud_intensity[cloud] - sqrtf(dist2) * shared_cloud_sqrt_divr[cloud]) * rain_scale
             }
         }
 
@@ -163,7 +158,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     }
 
     unsigned long long fixed_rain = 0;
-    if (in_bounds) {
+    if (cell_rainfall != 0.0f) {
         fixed_rain = (unsigned long long)FIXED(cell_rainfall);
         accessMat(d_water_level, row, col) += (int)fixed_rain;
     }
