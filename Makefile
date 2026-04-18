@@ -14,7 +14,7 @@ LIBS=-lm
 CULIBS=-lm rng.c
 
 # Targets to build
-OBJS=flood_seq flood_cuda flood_cuda_soa
+OBJS=flood_seq flood_cuda flood_cuda_soa flood_cuda_soa_stride
 
 # Rules. By default show help
 help:
@@ -56,6 +56,12 @@ flood_cuda_soa.o: flood_cuda_soa.cu
 flood_cuda_soa: flood.o flood_cuda_soa.o
 	$(CUDACC) $(DEBUG) $^ $(CULIBS) -o $@
 
+flood_cuda_soa_stride.o: flood_cuda_soa_stride.cu
+	$(CUDACC) $(CUFLAGS) $(DEBUG) -c $< -o $@
+
+flood_cuda_soa_stride: flood.o flood_cuda_soa_stride.o
+	$(CUDACC) $(DEBUG) $^ $(CULIBS) -o $@
+
 # Remove the target files
 clean:
 	rm -rf $(OBJS) *.o
@@ -74,6 +80,9 @@ animation_cuda:
 animation_cuda_soa:
 	make CUFLAGS="$(CUFLAGS) -DDEBUG -DANIMATION -g" FLAGS="$(FLAGS) -DDEBUG -DANIMATION -g" flood_cuda_soa
 
+animation_cuda_soa_stride:
+	make CUFLAGS="$(CUFLAGS) -DDEBUG -DANIMATION -g" FLAGS="$(FLAGS) -DDEBUG -DANIMATION -g" flood_cuda_soa_stride
+
 test_seq: flood_seq
 	./flood_seq $(cat test_files/debug.in)
 
@@ -85,3 +94,6 @@ test_cuda: flood_cuda
 
 test_cuda_soa: flood_cuda_soa
 	prun -t 15:00 -np 1 -native '-C gpunode' ./flood_cuda_soa $$(cat test_files/debug.in)
+
+test_cuda_soa_stride: flood_cuda_soa_stride
+	prun -t 15:00 -np 1 -native '-C gpunode' ./flood_cuda_soa_stride $$(cat test_files/debug.in)

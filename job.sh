@@ -14,3 +14,5 @@
 nvprof ./flood_cuda $(< test_files/large_mountains.in)
 
 nvprof ./flood_cuda_soa $(< test_files/large_mountains.in)
+
+nvprof ./flood_cuda_soa_stride $(< test_files/large_mountains.in)
