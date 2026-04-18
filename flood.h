@@ -28,8 +28,8 @@
 /*
  * Block dimensions
  */
-#define BLOCK_X 8
-#define BLOCK_Y 8
+#define BLOCK_X 16
+#define BLOCK_Y 16
 #define BLOCK_SIZE (BLOCK_X * BLOCK_Y)
 
 /*
