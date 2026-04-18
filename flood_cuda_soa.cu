@@ -84,15 +84,6 @@ __global__ void cloud_movement_kernel_soa(int num_clouds, float *d_cloud_x, floa
     d_cloud_y[cloud_idx] += km_minute * sinf(angle_rad);
 }
 
-__device__ float inv_sqrt_est(float n) {
-    float x2 = n * 0.5f;
-    long i = * (long *) &n;
-    i = 0x5f3759df - (i >> 1); // Magical bit shift
-    n = * (float *) &i;
-    n = n * (1.5f - (x2 * n * n)); // Newton's method
-    return n;
-}
-
 __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
                                               unsigned long long *d_total_rainfall,
                                               const float *__restrict__ d_cloud_x,
@@ -143,12 +134,13 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
             // 1.1 Calculate the circle radius
             float x_side = COORD_MAT2SCEN_X(blockIdx.x * blockDim.x) - COORD_MAT2SCEN_X(blockIdx.x * blockDim.x + blockDim.x);
             float y_side = COORD_MAT2SCEN_Y(blockIdx.y * blockDim.y) - COORD_MAT2SCEN_Y(blockIdx.y * blockDim.y + blockDim.y);
-            float block_radius = 1 / (inv_sqrt_est(x_side * x_side + y_side * y_side) * 2);
+            float block_radius = 1.43 * MAX(x_side, y_side) * 0.5;  // (Over) Estimation with 45 degree -> srqt(2) -> 1.43
 
             // 1.2 Calculate the distance of the block and the cloud centers
             float x_dist = shared_cloud_x[tid] - COORD_MAT2SCEN_X(blockIdx.x * blockDim.x + blockDim.x / 2);
             float y_dist = shared_cloud_y[tid] - COORD_MAT2SCEN_Y(blockIdx.y * blockDim.y + blockDim.y / 2);
-            float center_distance = 1 / inv_sqrt_est(x_dist * x_dist + y_dist * y_dist);
+            float center_distance = MAX(x_dist, y_dist);  // (Under) Estimation by taking the larger side of the rectangle
+
             // 1.3 Subtract the circle radius from the distance of rectangle block's center
             float block_cloud_dist = center_distance - block_radius;
 
@@ -163,7 +155,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
         // Number of clouds in the current tile (can be less than block size only in last tile)
         int tile_clouds = MIN(threads_per_block, num_clouds - i);
         for (int cloud = 0; cloud < tile_clouds; cloud++) { // Iterate through the tile of clouds
-            if (shared_cloud_active[cloud] * shared_cloud_block_coverage[cloud] == 0)
+            if ((shared_cloud_active[cloud] * shared_cloud_block_coverage[cloud]) == 0)
                 continue;
 
             float dx = x_pos - shared_cloud_x[cloud];
