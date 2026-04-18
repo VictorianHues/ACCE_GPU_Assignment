@@ -10,4 +10,4 @@
 #SBATCH --gres=gpu:1
 
 ## This is an example of a SLURM job script to run the program on a GPU node
-nvprof --metrics warp_divergence ./flood_cuda_soa $(< test_files/large_mountains.in)
+nvprof --metrics warp_execution_efficiency ./flood_cuda_soa $(< test_files/large_mountains.in)
