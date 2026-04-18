@@ -8,24 +8,24 @@ import os
 
 # Parameter sweeps
 rows_cols = [
-    (32,32), (64, 64), (128, 128), (512, 512), (1024, 1024)
+    (64, 64), (128, 128), (248, 248), (512, 512), (2048, 2048), (4096, 4096), (8192, 8192)
 ]
 scenarios = ['M', 'V', 'D', 'd']
-num_clouds_list = [4, 32, 256, 1024]
+num_clouds_list = [4, 32, 64, 256, 1024]
 ex_factors = [10]
 thresholds = [0.000001]
 num_minutes = [1000]
-cloud_max_radius = [50]
-cloud_max_intensity = [80]
-cloud_max_speed = [60]
-cloud_max_angle = [45]
+cloud_max_radius = [3]
+cloud_max_intensity = [100]
+cloud_max_speed = [50]
+cloud_max_angle = [90]
 cloud_seed = 12345
 
-# Fixed cloud front parameters (can be randomized if desired)
-front_distance_factor = 0.2  # Fraction of min(rows, cols)
-front_width_factor = 0.3     # Fraction of cols
-front_depth_factor = 0.1     # Fraction of min(rows, cols)
-front_direction = 240 # Direction of the cloud front (degrees)
+front_distance = 20
+front_width = 10
+front_depth = 10
+front_direction = 90 # Direction of the cloud front (degrees)
+
 
 def make_filename(params):
     return "exp_{rows}x{cols}_{scen}_c{clouds}_ex{ex}_t{thresh}_m{mins}.in".format(
@@ -42,9 +42,7 @@ def main():
     )
     for (rows, cols), scenario, num_clouds, ex_factor, threshold, mins, r, inten, speed, angle in sweep:
         # Scale front parameters based on scenario size
-        front_distance = int(round(front_distance_factor * min(rows, cols)))
-        front_width = int(round(front_width_factor * cols))
-        front_depth = max(1, int(round(front_depth_factor * min(rows, cols))))
+        
         params = dict(
             rows=rows, cols=cols, scenario=scenario, threshold=threshold, num_minutes=mins,
             ex_factor=ex_factor, front_distance=front_distance, front_width=front_width, front_depth=front_depth,

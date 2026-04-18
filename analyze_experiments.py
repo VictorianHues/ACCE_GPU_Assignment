@@ -32,6 +32,12 @@ def analyze_flood_results(csv_path, output_pdf):
     # Remove any rows that are actually the header (e.g., if header line appears as a row)
     if 'run' in df.columns:
         df = df[df['run'] != 'run']
+
+    # --- NEW: Average results for each (binary, input_file) group and save to CSV ---
+    group_cols = ['binary', 'input_file']
+    avg_cols = [col for col in df.columns if col not in ['run', 'binary', 'input_file']]
+    averaged = df.groupby(group_cols, as_index=False)[avg_cols].mean()
+    averaged.to_csv('_logs/experiment_results_averaged.csv', index=False)
     
     # 2. Extract metadata from the input_file column
     metadata = df['input_file'].apply(parse_filename)
