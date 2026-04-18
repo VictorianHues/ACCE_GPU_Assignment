@@ -8,12 +8,12 @@ import os
 
 # Parameter sweeps
 rows_cols = [
-    (128, 128), (512, 512), (2048, 2048), (4096, 4096), (8192, 8192)
+    (32,32), (64, 64), (128, 128), (512, 512), (1024, 1024)
 ]
 scenarios = ['M', 'V', 'D', 'd']
 num_clouds_list = [4, 32, 256, 1024]
-ex_factors = [10, 100]
-thresholds = [1e-7]
+ex_factors = [10]
+thresholds = [0.000001]
 num_minutes = [1000]
 cloud_max_radius = [50]
 cloud_max_intensity = [80]

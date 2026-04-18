@@ -142,6 +142,19 @@ void print_clouds(int num_clouds, Cloud_t *clouds) {
     }
     printf("\n");
 }
+void print_clouds_soa(int num_clouds, Cloud_soa_t clouds_soa) {
+    /*
+     * You don't need to optimize this function, it is only for pretty
+     * printing and debugging purposes.
+     */
+    printf("Clouds (SoA):\n");
+    for (int i = 0; i < num_clouds; i++) {
+        printf("Cloud %d: x = %f, y = %f, radius = %f, intensity = %f, speed = %f, angle = %f\n", i,
+               clouds_soa.x[i], clouds_soa.y[i], clouds_soa.radius[i], clouds_soa.intensity[i],
+               clouds_soa.speed[i], clouds_soa.angle[i]);
+    }
+    printf("\n");
+}   
 #endif // DEBUG
 
 /*

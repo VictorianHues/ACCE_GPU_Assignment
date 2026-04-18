@@ -92,7 +92,7 @@ double get_time();
 void print_matrix(int precision_type, int rows, int columns, void *mat, const char *msj);
 #ifdef DEBUG
 void print_clouds(int num_clouds, Cloud_t *clouds);
-void print_clouds(int num_clouds, Cloud_soa_t clouds_soa);
+void print_clouds_soa(int num_clouds, Cloud_soa_t clouds_soa);
 #endif // DEBUG
 #ifdef __CUDACC__
 }
