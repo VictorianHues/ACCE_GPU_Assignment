@@ -117,6 +117,7 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     __shared__ float shared_cloud_intensity[BLOCK_SIZE];
     __shared__ float shared_cloud_sqrt_divr[BLOCK_SIZE];
     __shared__ int shared_cloud_active[BLOCK_SIZE];
+    __shared__ int shared_cloud_block_coverage[BLOCK_SIZE];
 
     float cell_rainfall = 0.0f;
     float rain_scale = ex_factor / 60000.0f; // Precompute the scaling factor for rain contribution (ex_factor / 1000 / 60)
@@ -124,17 +125,15 @@ __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
     // Iterates through clouds, where one thread stores one cloud in shared memory, 
     // then all threads compute the rainfall contribution of the tile of clouds
     for (int i = 0; i < num_clouds; i += threads_per_block) { // Cloud tile in chunks of threads_per_block
-        int cloud_idx = i + tid;
-        if (cloud_idx < num_clouds) {
-            shared_cloud_x[tid] = d_cloud_x[cloud_idx];
-            shared_cloud_y[tid] = d_cloud_y[cloud_idx];
-            shared_cloud_radius[tid] = d_cloud_radius[cloud_idx];
-            shared_cloud_intensity[tid] = d_cloud_intensity[cloud_idx];
-            shared_cloud_sqrt_divr[tid] = d_cloud_sqrt_divr_intensity[cloud_idx];
-            shared_cloud_active[tid] = d_cloud_active[cloud_idx];
-        } else {
-            shared_cloud_active[tid] = 0;
-        }
+        int cloud_idx = int(fminf(i + tid, num_clouds - 1));
+        shared_cloud_x[tid] = d_cloud_x[cloud_idx];
+        shared_cloud_y[tid] = d_cloud_y[cloud_idx];
+        shared_cloud_radius[tid] = d_cloud_radius[cloud_idx];
+        shared_cloud_intensity[tid] = d_cloud_intensity[cloud_idx];
+        shared_cloud_sqrt_divr[tid] = d_cloud_sqrt_divr_intensity[cloud_idx];
+        shared_cloud_active[tid] = d_cloud_active[cloud_idx];
+        shared_cloud_active[tid] = (i + tid < num_clouds) * d_cloud_active[cloud_idx];
+
         __syncthreads();
         
         // Number of clouds in the current tile (can be less than block size only in last tile)
@@ -501,7 +500,6 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.speed, p->clouds_soa.speed, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.angle, p->clouds_soa.angle, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.active, p->clouds_soa.active, sizeof(int) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
-
 
     dim3 block(BLOCK_X, BLOCK_Y); // Adjust for GPU architecture and problem size
     dim3 grid((columns + block.x - 1) / block.x, (rows + block.y - 1) / block.y);
