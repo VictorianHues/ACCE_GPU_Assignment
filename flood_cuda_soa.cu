@@ -85,106 +85,59 @@ __global__ void cloud_movement_kernel_soa(int num_clouds, float *d_cloud_x, floa
 }
 
 __global__ void rainfall_kernel_soa(int rows, int columns, int num_clouds,
-                                              unsigned long long *d_total_rainfall,
-                                              const float *__restrict__ d_cloud_x,
-                                              const float *__restrict__ d_cloud_y,
-                                              const float *__restrict__ d_cloud_radius,
-                                              const float *__restrict__ d_cloud_intensity,
-                                              const float *__restrict__ d_cloud_sqrt_divr_intensity,
-                                              const int *__restrict__ d_cloud_active, float ex_factor,
-                                              int *d_water_level) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+                                    unsigned long long *d_total_rainfall,
+                                    const float *__restrict__ d_cloud_x,
+                                    const float *__restrict__ d_cloud_y,
+                                    const float *__restrict__ d_cloud_radius,
+                                    const float *__restrict__ d_cloud_intensity,
+                                    const float *__restrict__ d_cloud_sqrt_divr_intensity,
+                                    const int *__restrict__ d_cloud_active,
+                                    float ex_factor,
+                                    int *d_water_level) {
+    int cloud_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (cloud_idx >= num_clouds) return;
 
-    int tid = threadIdx.y * blockDim.x + threadIdx.x;
-    int threads_per_block = blockDim.x * blockDim.y;
+    // Match CPU behavior, not the previous SoA precompute path.
+    (void)d_cloud_sqrt_divr_intensity;
+    (void)d_cloud_active;
 
-    int in_bounds = (row < rows && col < columns);
-    float x_pos = 0.0f;
-    float y_pos = 0.0f;
+    float cloud_x = d_cloud_x[cloud_idx];
+    float cloud_y = d_cloud_y[cloud_idx];
+    float cloud_radius = d_cloud_radius[cloud_idx];
+    float cloud_intensity = d_cloud_intensity[cloud_idx];
 
-    // Precompute the scenario coordinates for the cell
-    // Avoids deadlock due to __syncthreads() when threads are out of bounds
-    if (in_bounds) {
-        x_pos = COORD_MAT2SCEN_X(col);
-        y_pos = COORD_MAT2SCEN_Y(row);
-    }
+    float row_start = COORD_SCEN2MAT_Y(MAX(0.0f, cloud_y - cloud_radius));
+    float row_end   = COORD_SCEN2MAT_Y(MIN(cloud_y + cloud_radius, (float)SCENARIO_SIZE));
+    float col_start = COORD_SCEN2MAT_X(MAX(0.0f, cloud_x - cloud_radius));
+    float col_end   = COORD_SCEN2MAT_X(MIN(cloud_x + cloud_radius, (float)SCENARIO_SIZE));
 
-    // Allocate shared memory for cloud properties (SoA format)
-    __shared__ float shared_cloud_x[BLOCK_SIZE];
-    __shared__ float shared_cloud_y[BLOCK_SIZE];
-    __shared__ float shared_cloud_radius[BLOCK_SIZE];
-    __shared__ float shared_cloud_intensity[BLOCK_SIZE];
-    __shared__ float shared_cloud_sqrt_divr[BLOCK_SIZE];
-    __shared__ int shared_cloud_active[BLOCK_SIZE];
+    for (float row_pos = row_start; row_pos < row_end; row_pos += 1.0f) {
+        for (float col_pos = col_start; col_pos < col_end; col_pos += 1.0f) {
+            float x_pos = COORD_MAT2SCEN_X(col_pos);
+            float y_pos = COORD_MAT2SCEN_Y(row_pos);
 
-    float cell_rainfall = 0.0f;
-    float rain_scale = ex_factor / 60000.0f; // Precompute the scaling factor for rain contribution (ex_factor / 1000 / 60)
+            float dx = x_pos - cloud_x;
+            float dy = y_pos - cloud_y;
+            float distance = sqrtf(dx * dx + dy * dy);
 
-    // Iterates through clouds, where one thread stores one cloud in shared memory, 
-    // then all threads compute the rainfall contribution of the tile of clouds
-    for (int i = 0; i < num_clouds; i += threads_per_block) { // Cloud tile in chunks of threads_per_block
-        int cloud_idx = i + tid;
-        if (cloud_idx < num_clouds) {
-            shared_cloud_x[tid] = d_cloud_x[cloud_idx];
-            shared_cloud_y[tid] = d_cloud_y[cloud_idx];
-            shared_cloud_radius[tid] = d_cloud_radius[cloud_idx];
-            shared_cloud_intensity[tid] = d_cloud_intensity[cloud_idx];
-            shared_cloud_sqrt_divr[tid] = d_cloud_sqrt_divr_intensity[cloud_idx];
-            shared_cloud_active[tid] = d_cloud_active[cloud_idx];
-        } else {
-            shared_cloud_active[tid] = 0;
-        }
-        __syncthreads();
-        
-        // Number of clouds in the current tile (can be less than block size only in last tile)
-        int tile_clouds = MIN(threads_per_block, num_clouds - i);
-        if (in_bounds) {
-            for (int cloud = 0; cloud < tile_clouds; cloud++) { // Iterate through the tile of clouds
-                if (shared_cloud_active[cloud] == 0)
-                    continue;
+            if (distance < cloud_radius) {
+                float rain = ex_factor *
+                             fmaxf(0.0f,
+                                   cloud_intensity -
+                                   distance / cloud_radius * sqrtf(cloud_intensity));
 
-                float dx = x_pos - shared_cloud_x[cloud];
-                float dy = y_pos - shared_cloud_y[cloud];
-                float dist2 = dx * dx + dy * dy;
-                float cloud_radius = shared_cloud_radius[cloud];
-                float radius2 = cloud_radius * cloud_radius; // Squaring is faster than sqrt, so we compare squared distances
+                float meters_per_minute = rain / 1000.0f / 60.0f;
+                int fixed_rain = FIXED(meters_per_minute);
 
-                if (dist2 < radius2) {
-                    float distance = sqrtf(dist2);
-                    float rain =
-                        fmaxf(0.0f, shared_cloud_intensity[cloud] - distance * shared_cloud_sqrt_divr[cloud]);
-                    cell_rainfall += rain_scale * rain;
+                int row_i = (int)row_pos;
+                int col_i = (int)col_pos;
+
+                if (row_i >= 0 && row_i < rows && col_i >= 0 && col_i < columns) {
+                    atomicAdd(&d_water_level[row_i * columns + col_i], fixed_rain);
+                    atomicAdd(d_total_rainfall, (unsigned long long)fixed_rain);
                 }
             }
         }
-
-        __syncthreads();
-    }
-
-    unsigned long long fixed_rain = 0;
-    if (in_bounds) {
-        fixed_rain = (unsigned long long)FIXED(cell_rainfall);
-        accessMat(d_water_level, row, col) += (int)fixed_rain;
-    }
-
-    // Allocate shared memory for reduction
-    __shared__ unsigned long long s_rain[BLOCK_SIZE]; // Shared memory for rainfall reduction (one element per thread)
-    s_rain[tid] = fixed_rain;
-    __syncthreads(); // Ensure all threads have written their rainfall to shared memory before reduction
-
-    // Parallel reduction (sum)
-    // NOTE: Requires blockDim.x * blockDim.y to be a power of 2 for this reduction to work correctly
-    for (int stride = threads_per_block / 2; stride > 0; stride /= 2) {
-        if (tid < stride) {
-            s_rain[tid] += s_rain[tid + stride];
-        }
-        __syncthreads(); // Ensure all threads have updated their partial sums before the next reduction step
-    }
-
-    // Only one thread per block updates the global total
-    if (tid == 0 && s_rain[0] > 0) { // Avoid atomicAdd if there is no rainfall in the block
-        atomicAdd(d_total_rainfall, s_rain[0]);
     }
 }
 
@@ -491,6 +444,18 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_level, sizeof(float) * cell_count));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_from_neigh, sizeof(float) * neigh_count));
 
+    for (int i = 0; i < p->num_clouds; ++i) {
+        p->clouds_soa.x[i] = p->clouds[i].x;
+        p->clouds_soa.y[i] = p->clouds[i].y;
+        p->clouds_soa.radius[i] = p->clouds[i].radius;
+        p->clouds_soa.intensity[i] = p->clouds[i].intensity;
+        p->clouds_soa.sqrt_divr_intensity[i] =
+            sqrtf(p->clouds[i].intensity) / p->clouds[i].radius;
+        p->clouds_soa.speed[i] = p->clouds[i].speed;
+        p->clouds_soa.angle[i] = p->clouds[i].angle;
+        p->clouds_soa.active[i] = 1;
+    }
+
 
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_ground, h_ground, sizeof(float) * cell_count, cudaMemcpyHostToDevice));
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.x, p->clouds_soa.x, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));
@@ -547,11 +512,27 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 #endif
 
         /* Step 1.2: Rainfall */
-        rainfall_kernel_soa<<<grid, block>>>(
-            rows, columns, p->num_clouds, d_total_rainfall, d_clouds_soa.x, d_clouds_soa.y,
-            d_clouds_soa.radius, d_clouds_soa.intensity, d_clouds_soa.sqrt_divr_intensity,
-            d_clouds_soa.active, p->ex_factor, d_water_level);
-        CUDA_CHECK_KERNEL();
+        // rainfall_kernel_soa<<<grid, block>>>(
+        //     rows, columns, p->num_clouds, d_total_rainfall, d_clouds_soa.x, d_clouds_soa.y,
+        //     d_clouds_soa.radius, d_clouds_soa.intensity, d_clouds_soa.sqrt_divr_intensity,
+        //     d_clouds_soa.active, p->ex_factor, d_water_level);
+        // CUDA_CHECK_KERNEL();
+        
+        int rain_block = 128;
+        int rain_grid = (p->num_clouds + rain_block - 1) / rain_block;
+
+        rainfall_kernel_soa<<<rain_grid, rain_block>>>(
+            rows, columns, p->num_clouds,
+            d_total_rainfall,
+            d_clouds_soa.x,
+            d_clouds_soa.y,
+            d_clouds_soa.radius,
+            d_clouds_soa.intensity,
+            d_clouds_soa.sqrt_divr_intensity,
+            d_clouds_soa.active,
+            p->ex_factor,
+            d_water_level
+        );
 
 
 #ifdef DEBUG
