@@ -33,7 +33,6 @@ def analyze_flood_results(csv_path, output_pdf):
     if 'run' in df.columns:
         df = df[df['run'] != 'run']
 
-    # --- NEW: Average results for each (binary, input_file) group and save to CSV ---
     group_cols = ['binary', 'input_file']
     avg_cols = [col for col in df.columns if col not in ['run', 'binary', 'input_file']]
     averaged = df.groupby(group_cols, as_index=False)[avg_cols].mean()
@@ -120,7 +119,6 @@ def analyze_flood_results(csv_path, output_pdf):
     plt.close(fig3)
 
     # --- FIGURE 4: Scenario Efficiency (Filtered for fixed grid size and cloud count) ---
-    # Choose the most common or median grid size and cloud count for scenario comparison
     grid_mode = avg_df['rows'].mode()[0]
     clouds_mode = avg_df['clouds'].mode()[0]
     filtered = avg_df[(avg_df['rows'] == grid_mode) & (avg_df['clouds'] == clouds_mode) & (avg_df['binary'] != 'flood_seq')]
@@ -133,8 +131,6 @@ def analyze_flood_results(csv_path, output_pdf):
     fig4.tight_layout()
     fig4.savefig('figure_speedup_by_scenario.pdf', bbox_inches='tight')
     plt.close(fig4)
-
-    print("Analysis Complete! Figures saved as individual PDF files for publication.")
 
     # --- FIGURE 5: Runtime Distribution by Implementation ---
     fig5, ax5 = plt.subplots()
@@ -202,7 +198,6 @@ def analyze_flood_results(csv_path, output_pdf):
     plt.close(fig9)
     
     # --- FIGURE 10: Heatmap (Grid Size x Clouds, colored by Runtime, faceted by Scenario) ---
-    # With rows == cols, heatmap is simpler
     for scenario in sorted(avg_df['scenario'].unique()):
         for metric in ['runtime', 'speedup']:
             pivot = avg_df[avg_df['scenario'] == scenario].pivot_table(
@@ -229,7 +224,6 @@ def analyze_flood_results(csv_path, output_pdf):
             edgecolor='k',
             label=None
         )
-        # Colorbar for scenario
         cbar = fig.colorbar(scatter, ax=ax, ticks=range(len(avg_df['scenario'].unique())))
         cbar.ax.set_yticklabels(sorted(avg_df['scenario'].unique()))
         ax.set_xscale('log')
