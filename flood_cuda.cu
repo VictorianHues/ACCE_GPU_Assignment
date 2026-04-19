@@ -575,6 +575,8 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 #endif
 
         /* Step 1.2: Rainfall */
+
+        /* UNCOMMENT KERNEL FOR CLOUD-PARALLEL IMPLEMENTATION*/
         // int rain_block = 256;
         // int rain_grid  = p->num_clouds;
         // size_t rain_shmem = rain_block * sizeof(unsigned long long);
@@ -587,10 +589,14 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         //     d_water_level
         // );
 		
+        /* COMMENT KERNEL FOR CLOUD-PARALLEL IMPLEMENTATION*/
         size_t rainfall_shared_mem = (size_t)(block.x * block.y) * sizeof(Cloud_t);
         alt_calc_rainfall_kernel_lekker<<<grid, block, rainfall_shared_mem>>>(rows, columns, p->num_clouds,
                                            d_total_rainfall, d_clouds, p->ex_factor,
                                            d_water_level);
+
+
+
         CUDA_CHECK_KERNEL();
 
 

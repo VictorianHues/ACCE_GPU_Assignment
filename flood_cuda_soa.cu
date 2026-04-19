@@ -665,6 +665,8 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 #endif
 
         /* Step 1.2: Rainfall */
+
+        /* UNCOMMENT KERNEL FOR CLOUD-PARALLEL IMPLEMENTATION*/
         // int rain_block = 256;  // try 128 and 256
         // int rain_grid  = p->num_clouds;
         // size_t rain_shmem = rain_block * sizeof(unsigned long long);
@@ -681,12 +683,14 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
         //     p->ex_factor,
         //     d_water_level
         // );
-        // CUDA_CHECK_KERNEL();
-		
+
+		/* COMMENT KERNEL FOR CLOUD-PARALLEL IMPLEMENTATION*/
         rainfall_kernel_soa<<<grid, block>>>(
             rows, columns, p->num_clouds, d_total_rainfall, d_clouds_soa.x, d_clouds_soa.y,
             d_clouds_soa.radius, d_clouds_soa.intensity, d_clouds_soa.sqrt_divr_intensity,
             d_clouds_soa.active, p->ex_factor, d_water_level);
+
+
         CUDA_CHECK_KERNEL();
 
 
