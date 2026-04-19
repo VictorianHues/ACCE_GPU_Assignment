@@ -95,7 +95,7 @@ Iterates over:
 4. Writes results to:
 ```_logs/experiment_results.csv```
 
-### Alternative CCloud-Parallel Implementation
+### Alternative Cloud-Parallel Implementation
 The provided CUDA implementations are parallelized over the grid. For an alternative approach, you can parallelize the rainfall step over the clouds instead. Because of time constraints explained in the discussion section of our report, this version can only be enabled by uncommenting the relevant sections in `flood_cuda_soa.cu` and `flood_cuda.cu` and is not included in the batch experiment scripts. You can run this version manually by uncommenting the relevant sections in the CUDA source files and re-commenting the original grid-parallel rainfall kernel, then running the modified binaries on the cluster.
 
 This implementation will pass all of the `check_correctness.py` tests, but just didn't make into the final implementation due to time constraints.
