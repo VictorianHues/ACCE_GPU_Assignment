@@ -81,6 +81,7 @@ sbatch batch_experiments_cuda_soa.sh
 
 This requires the resulting CSV files to be merged later into a singular experimental dataset, but allows you to run the CUDA experiments much faster by not waiting for many sequential runs to complete.
 
+
 ### What This Script Does
 Runs:
 - flood_seq (CPU baseline)
@@ -93,6 +94,11 @@ Iterates over:
 3. Extracts key metrics from program output
 4. Writes results to:
 ```_logs/experiment_results.csv```
+
+### Alternative CCloud-Parallel Implementation
+The provided CUDA implementations are parallelized over the grid. For an alternative approach, you can parallelize the rainfall step over the clouds instead. Because of time constraints explained in the discussion section of our report, this version can only be enabled by uncommenting the relevant sections in `flood_cuda_soa.cu` and `flood_cuda.cu` and is not included in the batch experiment scripts. You can run this version manually by uncommenting the relevant sections in the CUDA source files and re-commenting the original grid-parallel rainfall kernel, then running the modified binaries on the cluster.
+
+This implementation will pass all of the `check_correctness.py` tests, but just didn't make into the final implementation due to time constraints.
 
 ## Output Format
 
@@ -139,20 +145,4 @@ or directly:
 
 ``` bash
 uv run analyze_experiments.py
-```
-
-## Outputs
-
-Aggregated results:
-
-```text
-_logs/experiment_results_averaged.csv
-Figures (PDF):
-figure_speedup_vs_clouds.pdf
-figure_speedup_vs_grid_size.pdf
-figure_precision_loss_vs_rain.pdf
-figure_runtime_distribution_by_impl.pdf
-figure_correlation_heatmap.pdf
-figure_heatmap_*.pdf
-figure_bubble_*.pdf
 ```
