@@ -13,6 +13,12 @@ The experimental pipeline consists of four stages:
 
 ---
 
+## Load CUDA Module
+Before running experiments on DAS-5, load the CUDA module:
+```bash
+module load cuda12.6/toolkit
+```
+
 ## Setup Python Environment
 To run the Python scripts for generating inputs and analyzing results, set up a virtual environment:
 
@@ -21,6 +27,8 @@ pip install uv
 uv venv
 uv sync
 ```
+
+NOTE: The python scripts will not run on the DAS-5 login node due to module versioning and restrictions. You will need to pull the experimental results from the cluster to your local machine. This can be accomplished using `scp`, `rsync`, or just copy pasting from the cluster to transfer the `_logs/experiment_results.csv` file and any generated figures.
 
 ## Build Binaries
 Make sure to build the CPU and CUDA implementations before running experiments:
