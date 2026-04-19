@@ -97,3 +97,9 @@ test_cuda_soa: flood_cuda_soa
 
 test_cuda_soa_stride: flood_cuda_soa_stride
 	prun -t 15:00 -np 1 -native '-C gpunode' ./flood_cuda_soa_stride $$(cat test_files/debug.in)
+	
+build_visualizations:
+	uv sync
+	uv run analyze_experiments.py
+
+
