@@ -14,7 +14,7 @@ set -euo pipefail
 BINS=("flood_cuda_soa")
 INPUTS=(test_files/*.in)
 OUTCSV="_logs/cuda_soa_batch_experiments_results.csv"
-RUNS=10
+RUNS=25
 
 echo "run,binary,input_file,minute,max_spillage_minute,max_spillage_scenario,max_water_scenario,total_rain,total_water,total_water_loss,precision_loss,runtime" > "$OUTCSV"
 
