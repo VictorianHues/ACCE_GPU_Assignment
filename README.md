@@ -69,6 +69,18 @@ To execute all experiments across all implementations:
 sbatch batch_experiments.sh
 ```
 
+This runs the sequential, CUDA AoS, and CUDA SoA implementations on all generated input files, multiple times per configuration, and extracts key metrics from the output.
+
+The sequential runs are a bottleneck in runtime, so you may also choose to run each implementation individually, running the sequential implementation once to get baseline metrics, and then running the CUDA implementations many times separately to speed up the overall process.
+
+```bash
+sbatch batch_experiments_seq.sh
+sbatch batch_experiments_cuda.sh
+sbatch batch_experiments_cuda_soa.sh
+```
+
+This requires the resulting CSV files to be merged later into a singular experimental dataset, but allows you to run the CUDA experiments much faster by not waiting for many sequential runs to complete.
+
 ### What This Script Does
 Runs:
 - flood_seq (CPU baseline)
