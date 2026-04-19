@@ -491,6 +491,18 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_level, sizeof(float) * cell_count));
     CUDA_CHECK_FUNCTION(cudaMalloc((void **)&d_spillage_from_neigh, sizeof(float) * neigh_count));
 
+    for (int i = 0; i < p->num_clouds; ++i) {
+        p->clouds_soa.x[i] = p->clouds[i].x;
+        p->clouds_soa.y[i] = p->clouds[i].y;
+        p->clouds_soa.radius[i] = p->clouds[i].radius;
+        p->clouds_soa.intensity[i] = p->clouds[i].intensity;
+        p->clouds_soa.sqrt_divr_intensity[i] =
+            sqrtf(p->clouds[i].intensity) / p->clouds[i].radius;
+        p->clouds_soa.speed[i] = p->clouds[i].speed;
+        p->clouds_soa.angle[i] = p->clouds[i].angle;
+        p->clouds_soa.active[i] = 1;
+    }   
+
 
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_ground, h_ground, sizeof(float) * cell_count, cudaMemcpyHostToDevice));
     CUDA_CHECK_FUNCTION(cudaMemcpy(d_clouds_soa.x, p->clouds_soa.x, sizeof(float) * (size_t)p->num_clouds, cudaMemcpyHostToDevice));

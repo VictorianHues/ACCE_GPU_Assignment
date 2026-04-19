@@ -95,14 +95,76 @@ extern void do_compute(struct parameters *p, struct results *r) {
 #endif
 #endif
 
-        /* Step 1.2: Rainfall */
+        // /* Step 1.2: Rainfall */
+        // for (int cloud = 0; cloud < p->num_clouds; cloud++) {
+        //     Cloud_t c_cloud = p->clouds[cloud];
+        //     // Compute the bounding box area of the cloud
+        //     float row_start = COORD_SCEN2MAT_Y(MAX(0, c_cloud.y - c_cloud.radius));
+        //     float row_end = COORD_SCEN2MAT_Y(MIN(c_cloud.y + c_cloud.radius, SCENARIO_SIZE));
+        //     float col_start = COORD_SCEN2MAT_X(MAX(0, c_cloud.x - c_cloud.radius));
+        //     float col_end = COORD_SCEN2MAT_X(MIN(c_cloud.x + c_cloud.radius, SCENARIO_SIZE));
+        //     float distance;
+
+        //     // Add rain to the ground water level
+        //     float row_pos, col_pos;
+        //     for (row_pos = row_start; row_pos < row_end; row_pos++) {
+        //         for (col_pos = col_start; col_pos < col_end; col_pos++) {
+        //             float x_pos = COORD_MAT2SCEN_X(col_pos);
+        //             float y_pos = COORD_MAT2SCEN_Y(row_pos);
+        //             distance =
+        //                 sqrt((x_pos - c_cloud.x) * (x_pos - c_cloud.x) + (y_pos - c_cloud.y) * (y_pos - c_cloud.y));
+        //             if (distance < c_cloud.radius) {
+        //                 float rain = p->ex_factor *
+        //                              MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
+        //                 float meters_per_minute = rain / 1000 / 60;
+        //                 accessMat(water_level, row_pos, col_pos) += FIXED(meters_per_minute);
+        //                 r->total_rain += FIXED(meters_per_minute);
+        //             }
+        //         }
+        //     }
+        // }
+
+        // /* Step 1.2: Rainfall - TEMPORARY GPU-like CPU version */
+        // for (int row_pos = 0; row_pos < rows; row_pos++) {
+        //     for (int col_pos = 0; col_pos < columns; col_pos++) {
+        //         float x_pos = COORD_MAT2SCEN_X(col_pos);
+        //         float y_pos = COORD_MAT2SCEN_Y(row_pos);
+
+        //         float cell_rainfall = 0.0f;
+
+        //         for (int cloud = 0; cloud < p->num_clouds; cloud++) {
+        //             Cloud_t c_cloud = p->clouds[cloud];
+
+        //             float dx = x_pos - c_cloud.x;
+        //             float dy = y_pos - c_cloud.y;
+        //             float dist2 = dx * dx + dy * dy;
+        //             float radius2 = c_cloud.radius * c_cloud.radius;
+
+        //             if (dist2 < radius2) {
+        //                 float distance = sqrtf(dist2);
+        //                 float rain = p->ex_factor *
+        //                             MAX(0.0f,
+        //                                 c_cloud.intensity -
+        //                                 distance / c_cloud.radius * sqrtf(c_cloud.intensity));
+
+        //                 cell_rainfall += rain / 1000.0f / 60.0f;
+        //             }
+        //         }
+
+        //         int fixed_rain = FIXED(cell_rainfall);
+        //         accessMat(water_level, row_pos, col_pos) += fixed_rain;
+        //         r->total_rain += fixed_rain;
+        //     }
+        // }
+
+        /* Step 1.2: Rainfall - minimal explicit-index rewrite */
         for (int cloud = 0; cloud < p->num_clouds; cloud++) {
             Cloud_t c_cloud = p->clouds[cloud];
             // Compute the bounding box area of the cloud
             float row_start = COORD_SCEN2MAT_Y(MAX(0, c_cloud.y - c_cloud.radius));
-            float row_end = COORD_SCEN2MAT_Y(MIN(c_cloud.y + c_cloud.radius, SCENARIO_SIZE));
+            float row_end   = COORD_SCEN2MAT_Y(MIN(c_cloud.y + c_cloud.radius, SCENARIO_SIZE));
             float col_start = COORD_SCEN2MAT_X(MAX(0, c_cloud.x - c_cloud.radius));
-            float col_end = COORD_SCEN2MAT_X(MIN(c_cloud.x + c_cloud.radius, SCENARIO_SIZE));
+            float col_end   = COORD_SCEN2MAT_X(MIN(c_cloud.x + c_cloud.radius, SCENARIO_SIZE));
             float distance;
 
             // Add rain to the ground water level
@@ -111,18 +173,24 @@ extern void do_compute(struct parameters *p, struct results *r) {
                 for (col_pos = col_start; col_pos < col_end; col_pos++) {
                     float x_pos = COORD_MAT2SCEN_X(col_pos);
                     float y_pos = COORD_MAT2SCEN_Y(row_pos);
+
                     distance =
-                        sqrt((x_pos - c_cloud.x) * (x_pos - c_cloud.x) + (y_pos - c_cloud.y) * (y_pos - c_cloud.y));
+                        sqrt((x_pos - c_cloud.x) * (x_pos - c_cloud.x) +
+                            (y_pos - c_cloud.y) * (y_pos - c_cloud.y));
+
                     if (distance < c_cloud.radius) {
                         float rain = p->ex_factor *
-                                     MAX(0, c_cloud.intensity - distance / c_cloud.radius * sqrt(c_cloud.intensity));
+                                    MAX(0, c_cloud.intensity -
+                                            distance / c_cloud.radius * sqrt(c_cloud.intensity));
                         float meters_per_minute = rain / 1000 / 60;
-                        accessMat(water_level, row_pos, col_pos) += FIXED(meters_per_minute);
+
+                        int idx = (int)(row_pos * columns + col_pos);
+                        water_level[idx] += FIXED(meters_per_minute);
                         r->total_rain += FIXED(meters_per_minute);
                     }
                 }
             }
-        }
+        }     
 
 #ifdef DEBUG
         print_matrix(PRECISION_FIXED, rows, columns, water_level, "Water after rain");
