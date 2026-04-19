@@ -57,6 +57,7 @@ callgrind.out.*
 # Binaries
 flood_cuda
 flood_cuda_soa
+flood_cuda_soa_stride
 flood_seq
 
 # Project Files

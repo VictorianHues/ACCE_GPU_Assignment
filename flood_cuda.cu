@@ -83,6 +83,111 @@ __global__ void cloud_movement_kernel(int num_clouds, Cloud_t *d_clouds) {
     c_cloud->y += km_minute * sin(c_cloud->angle * M_PI / 180.0);
 }
 
+	
+__global__ void rainfall_kernel_aos(int rows, int columns, int num_clouds,
+                                    unsigned long long *d_total_rainfall,
+                                    const Cloud_t *__restrict__ d_clouds,
+                                    float ex_factor,
+                                    int *d_water_level) {
+
+    int cloud_idx = blockIdx.x;
+    if (cloud_idx >= num_clouds) return;
+
+    __shared__ float s_cloud_x;
+    __shared__ float s_cloud_y;
+    __shared__ float s_cloud_radius;
+    __shared__ float s_cloud_radius2;
+    __shared__ float s_cloud_intensity;
+    __shared__ float s_sqrt_intensity;
+    __shared__ float s_row_start;
+    __shared__ float s_row_end;
+    __shared__ float s_col_start;
+    __shared__ float s_col_end;
+    __shared__ int   s_active;
+
+    extern __shared__ unsigned long long s_rain[];
+
+    // Load cloud into shared memory
+    if (threadIdx.x == 0) {
+        Cloud_t c = d_clouds[cloud_idx];
+
+        s_cloud_x = c.x;
+        s_cloud_y = c.y;
+        s_cloud_radius = c.radius;
+        s_cloud_radius2 = c.radius * c.radius;
+        s_cloud_intensity = c.intensity;
+        s_sqrt_intensity = sqrtf(c.intensity);
+        s_active = c.active;
+
+        s_row_start = COORD_SCEN2MAT_Y(MAX(0.0f, s_cloud_y - s_cloud_radius));
+        s_row_end   = COORD_SCEN2MAT_Y(MIN(s_cloud_y + s_cloud_radius, (float)SCENARIO_SIZE));
+        s_col_start = COORD_SCEN2MAT_X(MAX(0.0f, s_cloud_x - s_cloud_radius));
+        s_col_end   = COORD_SCEN2MAT_X(MIN(s_cloud_x + s_cloud_radius, (float)SCENARIO_SIZE));
+    }
+    __syncthreads();
+
+    if (s_active == 0) return;
+
+    const float inv_rain_scale = 1.0f / 60000.0f;
+    unsigned long long local_rain = 0ULL;
+
+    // Iterate rows (same semantics as CPU)
+    for (int row_k = 0;; ++row_k) {
+        float row_pos = s_row_start + (float)row_k;
+        if (!(row_pos < s_row_end)) break;
+
+        int row_i = (int)row_pos;
+        if (row_i < 0 || row_i >= rows) continue;
+
+        float y_pos = COORD_MAT2SCEN_Y(row_pos);
+
+        for (int col_k = threadIdx.x;; col_k += blockDim.x) {
+            float col_pos = s_col_start + (float)col_k;
+            if (!(col_pos < s_col_end)) break;
+
+            int col_i = (int)col_pos;
+            if (col_i < 0 || col_i >= columns) continue;
+
+            float x_pos = COORD_MAT2SCEN_X(col_pos);
+
+            float dx = x_pos - s_cloud_x;
+            float dy = y_pos - s_cloud_y;
+            float dist2 = dx * dx + dy * dy;
+
+            if (dist2 < s_cloud_radius2) {
+                float distance = sqrtf(dist2);
+
+                float rain = ex_factor *
+                             fmaxf(0.0f,
+                                   s_cloud_intensity -
+                                   (distance / s_cloud_radius) * s_sqrt_intensity);
+
+                int fixed_rain = FIXED(rain * inv_rain_scale);
+
+                if (fixed_rain != 0) {
+                    atomicAdd(&d_water_level[row_i * columns + col_i], fixed_rain);
+                    local_rain += (unsigned long long)fixed_rain;
+                }
+            }
+        }
+    }
+
+    // Block reduction
+    s_rain[threadIdx.x] = local_rain;
+    __syncthreads();
+
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            s_rain[threadIdx.x] += s_rain[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0 && s_rain[0] > 0) {
+        atomicAdd(d_total_rainfall, s_rain[0]);
+    }
+}
+
 __global__ void alt_calc_rainfall_kernel_lekker(int rows, int columns, int num_clouds,
                                             unsigned long long *d_total_rainfall, Cloud_t *d_clouds,
                                             float ex_factor, int *d_water_level) {
@@ -470,6 +575,18 @@ extern "C" void do_compute(struct parameters *p, struct results *r) {
 #endif
 
         /* Step 1.2: Rainfall */
+        // int rain_block = 256;
+        // int rain_grid  = p->num_clouds;
+        // size_t rain_shmem = rain_block * sizeof(unsigned long long);
+
+        // rainfall_kernel_aos<<<rain_grid, rain_block, rain_shmem>>>(
+        //     rows, columns, p->num_clouds,
+        //     d_total_rainfall,
+        //     d_clouds,
+        //     p->ex_factor,
+        //     d_water_level
+        // );
+		
         size_t rainfall_shared_mem = (size_t)(block.x * block.y) * sizeof(Cloud_t);
         alt_calc_rainfall_kernel_lekker<<<grid, block, rainfall_shared_mem>>>(rows, columns, p->num_clouds,
                                            d_total_rainfall, d_clouds, p->ex_factor,
