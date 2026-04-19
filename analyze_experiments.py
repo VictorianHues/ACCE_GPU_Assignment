@@ -1,20 +1,16 @@
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from matplotlib.backends.backend_pdf import PdfPages
 import re
 import numpy as np
 
+
+# Filename parsing
 def parse_filename(filename):
-    """
-    Parses the filename based on the generator's template:
-    exp_{rows}x{cols}_{scen}_c{clouds}_ex{ex}_t{thresh}_m{mins}.in
-    """
     pattern = r"exp_(?P<rows>\d+)x(?P<cols>\d+)_(?P<scenario>\w)_c(?P<clouds>\d+)_ex(?P<ex>\d+)_t(?P<thresh>[^ _]+)_m(?P<mins>\d+)"
     match = re.search(pattern, filename)
     if match:
         d = match.groupdict()
-        # Convert numeric types
         return pd.Series({
             'rows': int(d['rows']),
             'cols': int(d['cols']),
@@ -26,213 +22,387 @@ def parse_filename(filename):
         })
     return pd.Series()
 
-def analyze_flood_results(csv_path, output_pdf):
-    # 1. Load Data
-    df = pd.read_csv(csv_path)
-    # Remove any rows that are actually the header (e.g., if header line appears as a row)
-    if 'run' in df.columns:
-        df = df[df['run'] != 'run']
+def analyze_flood_results(csv_path):
 
-    group_cols = ['binary', 'input_file']
-    avg_cols = [col for col in df.columns if col not in ['run', 'binary', 'input_file']]
-    averaged = df.groupby(group_cols, as_index=False)[avg_cols].mean()
-    averaged.to_csv('_logs/experiment_results_averaged.csv', index=False)
-    
-    # 2. Extract metadata from the input_file column
+    # Load
+    df = pd.read_csv(csv_path)
+
+    df = df[pd.to_numeric(df['runtime'], errors='coerce').notna()]
+
     metadata = df['input_file'].apply(parse_filename)
     df = pd.concat([df, metadata], axis=1)
 
-    # Ensure numeric columns are correct type
-    numeric_cols = ['runtime', 'precision_loss', 'total_rain', 'total_water', 'total_water_loss', 'max_spillage_minute', 'max_spillage_scenario', 'max_water_scenario', 'rows', 'cols', 'total_cells', 'clouds', 'ex_factor', 'mins']
+    # Convert numerics
+    numeric_cols = [
+        'runtime', 'precision_loss', 'total_rain',
+        'total_water', 'total_water_loss',
+        'rows', 'cols', 'total_cells',
+        'clouds', 'ex_factor', 'mins'
+    ]
     for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # 3. Calculate Speedup (always relative to flood_seq)
-    config_cols = ['rows', 'scenario', 'clouds', 'ex_factor']
-    avg_df = df.groupby(['binary'] + config_cols)['runtime'].mean().reset_index()
+    # Normalize precision loss
+    df['rel_precision_loss'] = df['precision_loss'] / df['total_water']
 
-    # Create a baseline lookup from flood_seq
-    seq_runs = avg_df[avg_df['binary'] == 'flood_seq'].set_index(config_cols)['runtime']
+    # Aggregate results
+    config_cols = ['rows', 'clouds', 'ex_factor']
 
-    def get_speedup(row):
-        key = tuple(row[config_cols])
-        # Only compute speedup for non-flood_seq binaries
-        if row['binary'] != 'flood_seq' and key in seq_runs and row['runtime'] > 0:
-            return seq_runs[key] / row['runtime']
+    avg_df = (
+        df.groupby(['binary'] + config_cols)
+        .agg(
+            runtime_mean=('runtime', 'mean'),
+            runtime_std=('runtime', 'std')
+        )
+        .reset_index()
+    )
+
+    # Speedup computation
+    seq_runs = (
+        avg_df[avg_df['binary'] == 'flood_seq']
+        .set_index(config_cols)['runtime_mean']
+    )
+
+    def compute_speedup(row):
+        key = tuple(row[c] for c in config_cols)
+        if row['binary'] != 'flood_seq' and key in seq_runs.index:
+            return seq_runs.loc[key] / row['runtime_mean']
         return np.nan
 
-    avg_df['speedup'] = avg_df.apply(get_speedup, axis=1)
+    avg_df['speedup'] = avg_df.apply(compute_speedup, axis=1)
 
-    # 4. Visualization
+    # Efficiency
+    avg_df['cloud_efficiency'] = avg_df['speedup'] / avg_df['clouds']
+    avg_df['grid_efficiency'] = avg_df['speedup'] / avg_df['rows']
 
+    # Plot style
     sns.set_theme(style="whitegrid", palette="tab10")
-    # Common style params for clarity
-    plt_params = {
-        'figure.figsize': (5.5, 4),  # ~two-column width
+    plt.rcParams.update({
+        'figure.figsize': (5.5, 4),
         'axes.titlesize': 11,
         'axes.labelsize': 10,
-        'xtick.labelsize': 9,
-        'ytick.labelsize': 9,
-        'legend.fontsize': 7,
-        'legend.title_fontsize': 7,
-        'lines.markersize': 6,
-        'lines.linewidth': 1.5,
-        'axes.titlepad': 8
-    }
-    plt.rcParams.update(plt_params)
+        'legend.fontsize': 8,
+        "legend.title_fontsize": 9,
+    })
 
-    # --- FIGURE 1: Strong Scaling (Increasing Clouds, Fixed Grid) ---
-    scaling_data = avg_df[avg_df['binary'] != 'flood_seq']
-    fig1, ax1 = plt.subplots()
-    sns.lineplot(data=scaling_data, x='clouds', y='speedup', hue='binary', style='rows', markers=True, dashes=False, ax=ax1)
-    ax1.set_xscale('log', base=2)
-    ax1.set_title('Speedup vs. Cloud Density')
-    ax1.set_ylabel('Speedup ($T_{seq} / T_{cuda}$)')
-    ax1.set_xlabel('Number of Clouds (log2)')
-    ax1.legend(loc='best', frameon=True)
-    fig1.tight_layout()
-    fig1.savefig('figure_speedup_vs_clouds.pdf', bbox_inches='tight')
-    plt.close(fig1)
+    # -----------------------------
+    # FIGURE 1: Speedup vs Clouds
+    # -----------------------------
+    scaling = avg_df[avg_df['binary'] != 'flood_seq']
 
-    # --- FIGURE 2: Problem Size Scaling (Increasing Grid Size) ---
-    fig2, ax2 = plt.subplots()
-    sns.lineplot(data=scaling_data, x='rows', y='speedup', hue='binary', style='clouds', markers=True, dashes=False, ax=ax2)
-    ax2.set_xscale('log', base=2)
-    ax2.set_title('Speedup vs. Grid Size (Rows=Cols)')
-    ax2.set_ylabel('Speedup')
-    ax2.set_xlabel('Grid Size (Rows = Cols, log2)')
-    ax2.legend(loc='best', frameon=True)
-    fig2.tight_layout()
-    fig2.savefig('figure_speedup_vs_grid_size.pdf', bbox_inches='tight')
-    plt.close(fig2)
+    fig, ax = plt.subplots()
 
-    # --- FIGURE 3: Precision Loss Analysis ---
-    fig3, ax3 = plt.subplots()
-    sns.scatterplot(data=df[df['binary'] != 'flood_seq'], x='total_rain', y='precision_loss', hue='binary', alpha=0.5, ax=ax3)
-    ax3.set_title('Precision Loss vs. Total Rainfall')
-    ax3.set_xlabel('Total Rainfall Volume')
-    ax3.set_ylabel('Precision Loss')
-    ax3.legend(loc='best', frameon=True)
-    fig3.tight_layout()
-    fig3.savefig('figure_precision_loss_vs_rain.pdf', bbox_inches='tight')
-    plt.close(fig3)
-
-    # --- FIGURE 4: Scenario Efficiency (Filtered for fixed grid size and cloud count) ---
-    grid_mode = avg_df['rows'].mode()[0]
-    clouds_mode = avg_df['clouds'].mode()[0]
-    filtered = avg_df[(avg_df['rows'] == grid_mode) & (avg_df['clouds'] == clouds_mode) & (avg_df['binary'] != 'flood_seq')]
-    fig4, ax4 = plt.subplots()
-    sns.barplot(data=filtered, x='scenario', y='speedup', hue='binary', ax=ax4)
-    ax4.set_title(f'Speedup by Scenario (Rows={grid_mode}, Clouds={clouds_mode})')
-    ax4.set_xlabel('Scenario')
-    ax4.set_ylabel('Speedup')
-    ax4.legend(loc='best', frameon=True)
-    fig4.tight_layout()
-    fig4.savefig('figure_speedup_by_scenario.pdf', bbox_inches='tight')
-    plt.close(fig4)
-
-    # --- FIGURE 5: Runtime Distribution by Implementation ---
-    fig5, ax5 = plt.subplots()
-    sns.boxplot(data=df, x='binary', y='runtime', hue='scenario', ax=ax5)
-    ax5.set_title('Runtime Distribution by Implementation and Scenario')
-    ax5.set_xlabel('Implementation')
-    ax5.set_ylabel('Runtime (s)')
-    ax5.legend(loc='best', frameon=True, title='Scenario')
-    fig5.tight_layout()
-    fig5.savefig('figure_runtime_distribution_by_impl.pdf', bbox_inches='tight')
-    plt.close(fig5)
-
-    # --- FIGURE 6: Precision Loss vs. Runtime ---
-    fig6, ax6 = plt.subplots()
-    sns.scatterplot(data=df, x='runtime', y='precision_loss', hue='binary', style='scenario', alpha=0.7, ax=ax6)
-    ax6.set_title('Precision Loss vs. Runtime')
-    ax6.set_xlabel('Runtime (s)')
-    ax6.set_ylabel('Precision Loss')
-    ax6.legend(loc='best', frameon=True)
-    fig6.tight_layout()
-    fig6.savefig('figure_precision_loss_vs_runtime.pdf', bbox_inches='tight')
-    plt.close(fig6)
-
-    # --- FIGURE 7: Total Water Loss Analysis ---
-    fig7, ax7 = plt.subplots()
-    sns.boxplot(data=df, x='binary', y='total_water_loss', hue='scenario', ax=ax7)
-    ax7.set_title('Total Water Loss by Implementation and Scenario')
-    ax7.set_xlabel('Implementation')
-    ax7.set_ylabel('Total Water Loss')
-    ax7.legend(loc='best', frameon=True, title='Scenario')
-    fig7.tight_layout()
-    fig7.savefig('figure_total_water_loss_by_impl.pdf', bbox_inches='tight')
-    plt.close(fig7)
-
-    # --- FIGURE 8: Scenario Comparison (Average Runtime, Filtered) ---
-    avg_runtime_filtered = df[(df['rows'] == grid_mode) & (df['clouds'] == clouds_mode)]
-    avg_runtime = avg_runtime_filtered.groupby(['scenario', 'binary'])['runtime'].mean().reset_index()
-    fig8, ax8 = plt.subplots()
-    sns.barplot(data=avg_runtime, x='scenario', y='runtime', hue='binary', ax=ax8)
-    ax8.set_title(f'Average Runtime by Scenario (Rows={grid_mode}, Clouds={clouds_mode})')
-    ax8.set_xlabel('Scenario')
-    ax8.set_ylabel('Average Runtime (s)')
-    ax8.legend(loc='best', frameon=True)
-    fig8.tight_layout()
-    fig8.savefig('figure_avg_runtime_by_scenario.pdf', bbox_inches='tight')
-    plt.close(fig8)
-
-    # --- FIGURE 9: Correlation Heatmap ---
-    corr = df[[col for col in df.columns if df[col].dtype in [np.float64, np.int64]]].corr()
-    fig_width = max(7, 0.7 * len(corr.columns))
-    fig_height = max(6, 0.7 * len(corr.columns))
-    fig9, ax9 = plt.subplots(figsize=(fig_width, fig_height))
-    sns.heatmap(
-        corr,
-        annot=True,
-        fmt='.2f',
-        cmap='coolwarm',
-        ax=ax9,
-        cbar_kws={'shrink': 0.7},
-        annot_kws={"size": 7}
+    sns.lineplot(
+        data=scaling,
+        x='clouds', y='speedup',
+        hue='binary',
+        errorbar='sd',
+        marker='o',
+        ax=ax
     )
-    ax9.set_title('Correlation Heatmap (Numeric Columns)')
-    fig9.tight_layout()
-    fig9.savefig('figure_correlation_heatmap.pdf', bbox_inches='tight')
-    plt.close(fig9)
-    
-    # --- FIGURE 10: Heatmap (Grid Size x Clouds, colored by Runtime, faceted by Scenario) ---
-    for scenario in sorted(avg_df['scenario'].unique()):
-        for metric in ['runtime', 'speedup']:
-            pivot = avg_df[avg_df['scenario'] == scenario].pivot_table(
-                index='rows', columns='clouds', values=metric, aggfunc='mean')
+
+    ax.set_xscale('log', base=2)
+    #ax.set_title('Speedup vs Clouds')
+    ax.set_ylabel('Speedup vs Seq')
+    ax.set_xlabel('Clouds (log2)')
+    ax.legend()
+
+    fig.tight_layout()
+    fig.savefig('fig_speedup_vs_clouds.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 2: Speedup vs Grid Size
+    # -----------------------------
+    fig, ax = plt.subplots()
+
+    sns.lineplot(
+        data=scaling,
+        x='rows', y='speedup',
+        hue='binary',
+        errorbar='sd',
+        marker='o',
+        ax=ax
+    )
+
+    ax.set_xscale('log', base=2)
+    #ax.set_title('Speedup vs Grid Size')
+    ax.set_xlabel('Grid Size (log2)')
+    ax.set_ylabel('Speedup vs Seq')
+    ax.legend(title='Implementation')
+
+    fig.tight_layout()
+    fig.savefig('fig_speedup_vs_grid.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 3: Efficiency
+    # -----------------------------
+    fig, ax = plt.subplots()
+
+    sns.lineplot(
+        data=scaling,
+        x='clouds', y='cloud_efficiency',
+        hue='binary',
+        marker='o',
+        ax=ax
+    )
+
+    ax.set_xscale('log', base=2)
+    #ax.set_title('Parallel Efficiency')
+    ax.set_ylabel('Efficiency (Speedup / Clouds)')
+    ax.set_xlabel('Clouds')
+    ax.legend(title='Implementation')
+
+    fig.tight_layout()
+    fig.savefig('fig_cloud_efficiency.pdf')
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+
+    sns.lineplot(
+        data=scaling,
+        x='rows', y='grid_efficiency',
+        hue='binary',
+        marker='o',
+        ax=ax
+    )
+
+    ax.set_xscale('log', base=2)
+    #ax.set_title('Parallel Efficiency')
+    ax.set_ylabel('Efficiency (Speedup / Grid Size)')
+    ax.set_xlabel('Grid Size')
+    ax.legend(title='Implementation')
+
+    fig.tight_layout()
+    fig.savefig('fig_grid_efficiency.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 4: AoS vs SoA comparison
+    # -----------------------------
+    comp = avg_df.pivot_table(
+        index=['rows', 'clouds'],
+        columns='binary',
+        values='runtime_mean'
+    ).reset_index()
+
+    comp['soa_vs_aos'] = comp['flood_cuda'] / comp['flood_cuda_soa']
+
+    fig, ax = plt.subplots()
+
+    sns.lineplot(
+        data=comp,
+        x='clouds', y='soa_vs_aos',
+        hue='rows',
+        marker='o',
+        ax=ax
+    )
+
+    ax.set_xscale('log', base=2)
+    #ax.set_title('SoA vs AoS ( >1 = SoA faster )')
+    ax.set_ylabel('AoS / SoA Runtime')
+    ax.set_xlabel('Clouds')
+
+    fig.tight_layout()
+    fig.savefig('fig_soa_vs_aos.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 5: Runtime scaling (log-log)
+    # -----------------------------
+    fig, ax = plt.subplots()
+
+    sns.lineplot(
+        data=df,
+        x='total_cells', y='runtime',
+        hue='binary',
+        marker='o',
+        ax=ax
+    )
+
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+
+    #ax.set_title('Runtime Scaling (log-log)')
+    ax.set_xlabel('Total Cells')
+    ax.set_ylabel('Runtime (Seconds)')
+
+    fig.tight_layout()
+    fig.savefig('fig_runtime_scaling.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 6: Precision loss (normalized)
+    # -----------------------------
+    fig, ax = plt.subplots()
+
+    sns.scatterplot(
+        data=df,
+        x='total_rain',
+        y='rel_precision_loss',
+        hue='binary',
+        alpha=0.5,
+        ax=ax
+    )
+
+    #ax.set_title('Relative Precision Loss vs Rain')
+    ax.set_xlabel('Total Rain')
+    ax.set_ylabel('Relative Precision Loss')
+
+    fig.tight_layout()
+    fig.savefig('fig_precision_loss.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 7: Runtime distribution
+    # -----------------------------
+    fig, ax = plt.subplots()
+
+    sns.boxplot(
+        data=df,
+        x='binary',
+        y='runtime',
+        ax=ax
+    )
+
+    #ax.set_title('Runtime Distribution')
+    ax.set_xlabel('Implementation')
+    ax.set_ylabel('Runtime (Seconds)')
+
+    fig.tight_layout()
+    fig.savefig('fig_runtime_distribution.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 8: Correlation heatmap
+    # -----------------------------
+
+    corr_df = df.select_dtypes(include=[np.number]).drop(columns=['ex_factor', 'mins'], errors='ignore')
+    corr_pearson = corr_df.corr(method='pearson')
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(corr_pearson, cmap='coolwarm', annot=False, ax=ax)
+
+    #ax.set_title('Correlation Heatmap')
+
+    fig.tight_layout()
+    fig.savefig('fig_correlation_pearson.pdf')
+    plt.close(fig)
+
+    corr_spearman = corr_df.corr(method='spearman')
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(corr_spearman, cmap='coolwarm', annot=False, ax=ax)
+
+    #ax.set_title('Correlation Heatmap')
+
+    fig.tight_layout()
+    fig.savefig('fig_correlation_spearman.pdf')
+    plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 9: Heatmaps (Grid Size vs Clouds)
+    # -----------------------------
+
+    binaries = ['flood_seq', 'flood_cuda', 'flood_cuda_soa']
+    metrics = ['runtime_mean', 'speedup']
+
+    for binary in binaries:
+        for metric in metrics:
+
+            # Skip invalid combination
+            if binary == 'flood_seq' and metric == 'speedup':
+                continue
+
+            subset = avg_df[avg_df['binary'] == binary]
+
+            if subset.empty:
+                continue
+
+            pivot = subset.pivot_table(
+                index='rows',
+                columns='clouds',
+                values=metric,
+                aggfunc='mean'
+            )
+
+            # Ensure sorted axes (important for readability)
+            pivot = pivot.sort_index().sort_index(axis=1)
+
+            # Skip empty / all-NaN
+            if pivot.empty or not np.isfinite(pivot.values).any():
+                continue
+
             fig, ax = plt.subplots(figsize=(6, 4))
-            sns.heatmap(pivot, annot=True, fmt='.2f', cmap='viridis', ax=ax, cbar_kws={'label': metric})
-            ax.set_title(f'{metric.capitalize()} Heatmap\nScenario: {scenario} (Rows=Cols)')
+
+            sns.heatmap(
+                pivot,
+                annot=True,
+                fmt='.2f',
+                cmap='viridis',
+                cbar_kws={'label': metric.replace('_', ' ').capitalize()},
+                ax=ax
+            )
+
+            # ax.set_title(
+            #     f"{metric.replace('_', ' ').capitalize()} Heatmap\n"
+            #     f"{binary} (Rows = Cols)"
+            # )
             ax.set_xlabel('Number of Clouds')
-            ax.set_ylabel('Grid Size (Rows=Cols)')
+            ax.set_ylabel('Grid Size')
+
             fig.tight_layout()
-            fig.savefig(f'figure_heatmap_{metric}_scenario_{scenario}.pdf', bbox_inches='tight')
+
+            fig.savefig(
+                f'fig_heatmap_{metric}_{binary}.pdf',
+                bbox_inches='tight'
+            )
+
             plt.close(fig)
 
-    # --- FIGURE 11: Bubble Plot (Grid Size vs Runtime/Speedup, bubble=clouds, color=scenario) ---
-    for metric in ['runtime', 'speedup']:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        scatter = ax.scatter(
-            avg_df['rows'],
-            avg_df[metric],
-            s=avg_df['clouds'] * 0.7,  # scale for visibility
-            c=avg_df['scenario'].astype('category').cat.codes,
-            cmap='tab10',
-            alpha=0.5,
-            edgecolor='k',
-            label=None
-        )
-        cbar = fig.colorbar(scatter, ax=ax, ticks=range(len(avg_df['scenario'].unique())))
-        cbar.ax.set_yticklabels(sorted(avg_df['scenario'].unique()))
-        ax.set_xscale('log')
-        ax.set_xlabel('Grid Size (Rows=Cols, log2)')
-        ax.set_ylabel(metric.capitalize())
-        ax.set_title(f'{metric.capitalize()} vs Grid Size (Bubble=Clouds, Color=Scenario)')
-        fig.tight_layout()
-        fig.savefig(f'figure_bubble_{metric}_gridsize.pdf', bbox_inches='tight')
-        plt.close(fig)
+
+    # -----------------------------
+    # FIGURE 10: SoA vs AoS Difference Heatmap
+    # -----------------------------
+    comp = avg_df.pivot_table(
+        index=['rows', 'clouds'],
+        columns='binary',
+        values='runtime_mean'
+    ).reset_index()
+
+    if 'flood_cuda' in comp and 'flood_cuda_soa' in comp:
+        comp['diff'] = comp['flood_cuda'] - comp['flood_cuda_soa']
+
+        pivot = comp.pivot_table(
+            index='rows',
+            columns='clouds',
+            values='diff'
+        ).sort_index().sort_index(axis=1)
+
+        if not pivot.empty and np.isfinite(pivot.values).any():
+
+            fig, ax = plt.subplots(figsize=(6, 4))
+
+            sns.heatmap(
+                pivot,
+                annot=True,
+                fmt='.2f',
+                cmap='coolwarm',
+                center=0,
+                cbar_kws={'label': 'Runtime Difference (AoS - SoA)'},
+                ax=ax
+            )
+
+            #ax.set_title('SoA vs AoS Runtime Difference\n(Positive = SoA Faster)')
+            ax.set_xlabel('Clouds')
+            ax.set_ylabel('Grid Size')
+
+            fig.tight_layout()
+            fig.savefig('fig_heatmap_soa_vs_aos_diff.pdf', bbox_inches='tight')
+            plt.close(fig)
+
 
 if __name__ == "__main__":
-    analyze_flood_results('_logs/experiment_results.csv', 'flood_cuda_report.pdf')
+    analyze_flood_results('_logs/experiment_results.csv')
